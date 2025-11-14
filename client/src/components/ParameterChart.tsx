@@ -42,7 +42,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
     .slice()
     .reverse()
     .map((entry) => ({
-      time: format(new Date(entry.appliedAt), "HH:mm"),
+      time: format(new Date(entry.appliedAt), "HH:mm:ss"),
       fullTime: format(new Date(entry.appliedAt), "MMM d, HH:mm:ss"),
       intervalMin: entry.connectionIntervalMin,
       intervalMax: entry.connectionIntervalMax,
