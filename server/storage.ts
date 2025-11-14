@@ -1,37 +1,71 @@
-import { type User, type InsertUser } from "@shared/schema";
-import { randomUUID } from "crypto";
-
-// modify the interface with any CRUD methods
-// you might need
+import type { ConnectionParameterSet, ESP32Status, DashboardState, UpdateParameters, ConnectionParameters } from "@shared/schema";
 
 export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
+  getState(): Promise<DashboardState>;
+  updateNextParameters(params: Partial<UpdateParameters>): Promise<DashboardState>;
+  applyNextParameters(): Promise<DashboardState>;
+  updateStatus(status: Partial<ESP32Status>): Promise<DashboardState>;
 }
 
 export class MemStorage implements IStorage {
-  private users: Map<string, User>;
+  private state: DashboardState;
 
   constructor() {
-    this.users = new Map();
+    this.state = {
+      parameters: {
+        previous: null,
+        current: {
+          connectionIntervalMin: 280,
+          connectionIntervalMax: 350,
+          peripheralLatency: 8,
+          supervisionTimeout: 3000,
+        },
+        next: null,
+      },
+      status: {
+        isAdvertising: true,
+        isConnected: false,
+        connectedDeviceName: null,
+        browserConnected: false,
+      },
+    };
   }
 
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+  async getState(): Promise<DashboardState> {
+    return JSON.parse(JSON.stringify(this.state));
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+  async updateNextParameters(params: Partial<UpdateParameters>): Promise<DashboardState> {
+    const current = this.state.parameters.current;
+    const existingNext = this.state.parameters.next || { ...current };
+    
+    this.state.parameters.next = {
+      connectionIntervalMin: params.connectionIntervalMin ?? existingNext.connectionIntervalMin,
+      connectionIntervalMax: params.connectionIntervalMax ?? existingNext.connectionIntervalMax,
+      peripheralLatency: params.peripheralLatency ?? existingNext.peripheralLatency,
+      supervisionTimeout: params.supervisionTimeout ?? existingNext.supervisionTimeout,
+    };
+    
+    return this.getState();
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
+  async applyNextParameters(): Promise<DashboardState> {
+    if (this.state.parameters.next) {
+      this.state.parameters.previous = { ...this.state.parameters.current };
+      this.state.parameters.current = { ...this.state.parameters.next };
+      this.state.parameters.next = null;
+    }
+    
+    return this.getState();
+  }
+
+  async updateStatus(status: Partial<ESP32Status>): Promise<DashboardState> {
+    this.state.status = {
+      ...this.state.status,
+      ...status,
+    };
+    
+    return this.getState();
   }
 }
 

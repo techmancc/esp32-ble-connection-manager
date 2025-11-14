@@ -1,18 +1,37 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
+export const connectionParametersSchema = z.object({
+  connectionIntervalMin: z.number().min(7.5).max(4000),
+  connectionIntervalMax: z.number().min(7.5).max(4000),
+  peripheralLatency: z.number().min(0).max(499).int(),
+  supervisionTimeout: z.number().min(100).max(32000),
 });
 
-export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
+export type ConnectionParameters = z.infer<typeof connectionParametersSchema>;
+
+export interface ConnectionParameterSet {
+  previous: ConnectionParameters | null;
+  current: ConnectionParameters;
+  next: ConnectionParameters | null;
+}
+
+export interface ESP32Status {
+  isAdvertising: boolean;
+  isConnected: boolean;
+  connectedDeviceName: string | null;
+  browserConnected: boolean;
+}
+
+export interface DashboardState {
+  parameters: ConnectionParameterSet;
+  status: ESP32Status;
+}
+
+export const updateParametersSchema = z.object({
+  connectionIntervalMin: z.number().min(7.5).max(4000),
+  connectionIntervalMax: z.number().min(7.5).max(4000),
+  peripheralLatency: z.number().min(0).max(499).int(),
+  supervisionTimeout: z.number().min(100).max(32000),
 });
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
-export type User = typeof users.$inferSelect;
+export type UpdateParameters = z.infer<typeof updateParametersSchema>;
