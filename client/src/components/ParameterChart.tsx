@@ -47,7 +47,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
       intervalMin: entry.connectionIntervalMin,
       intervalMax: entry.connectionIntervalMax,
       latency: entry.peripheralLatency,
-      timeout: entry.supervisionTimeout / 10,
+      timeout: entry.supervisionTimeout,
     }));
 
   if (history.length === 0) {
@@ -131,7 +131,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
               }}
               formatter={(value: number, name: string) => {
                 if (name === "timeout") {
-                  return [`${(value * 10).toFixed(0)} ms`, "Timeout"];
+                  return [`${value.toFixed(0)} ms`, "Timeout"];
                 }
                 if (name === "latency") {
                   return [value.toString(), "Latency"];
@@ -169,7 +169,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
               dataKey="timeout"
               stroke="hsl(var(--chart-4))"
               strokeWidth={2}
-              name="Timeout (÷10)"
+              name="Timeout"
               dot={{ fill: "hsl(var(--chart-4))", r: 3 }}
             />
           </LineChart>

@@ -20,7 +20,7 @@ export function ExportButtons({ state, history }: ExportButtonsProps) {
   };
 
   const handleExportCSV = () => {
-    exportToCSV(history);
+    exportToCSV(state, history);
   };
 
   return (
