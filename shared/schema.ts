@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { pgTable, serial, varchar, timestamp, real, integer } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { sql } from "drizzle-orm";
 
 export const connectionParametersSchema = z.object({
   connectionIntervalMin: z.number().min(7.5).max(4000),
@@ -35,3 +38,40 @@ export const updateParametersSchema = z.object({
 });
 
 export type UpdateParameters = z.infer<typeof updateParametersSchema>;
+
+export const parameterHistory = pgTable("parameter_history", {
+  id: serial("id").primaryKey(),
+  connectionIntervalMin: real("connection_interval_min").notNull(),
+  connectionIntervalMax: real("connection_interval_max").notNull(),
+  peripheralLatency: integer("peripheral_latency").notNull(),
+  supervisionTimeout: real("supervision_timeout").notNull(),
+  appliedAt: timestamp("applied_at").notNull().default(sql`now()`),
+  source: varchar("source", { length: 50 }).notNull().default("manual"),
+});
+
+export const insertParameterHistorySchema = createInsertSchema(parameterHistory).omit({
+  id: true,
+  appliedAt: true,
+});
+
+export type ParameterHistory = typeof parameterHistory.$inferSelect;
+export type InsertParameterHistory = z.infer<typeof insertParameterHistorySchema>;
+
+export const parameterPresets = pgTable("parameter_presets", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 100 }).notNull().unique(),
+  description: varchar("description", { length: 255 }),
+  connectionIntervalMin: real("connection_interval_min").notNull(),
+  connectionIntervalMax: real("connection_interval_max").notNull(),
+  peripheralLatency: integer("peripheral_latency").notNull(),
+  supervisionTimeout: real("supervision_timeout").notNull(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertParameterPresetSchema = createInsertSchema(parameterPresets).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type ParameterPreset = typeof parameterPresets.$inferSelect;
+export type InsertParameterPreset = z.infer<typeof insertParameterPresetSchema>;

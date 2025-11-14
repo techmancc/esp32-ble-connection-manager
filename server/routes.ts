@@ -33,6 +33,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get("/api/history", async (req, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const history = await storage.getHistory(limit);
+      res.json(history);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get history" });
+    }
+  });
+
+  app.get("/api/presets", async (req, res) => {
+    try {
+      const presets = await storage.getPresets();
+      res.json(presets);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get presets" });
+    }
+  });
+
+  app.post("/api/presets", async (req, res) => {
+    try {
+      const preset = await storage.createPreset(req.body);
+      res.json(preset);
+    } catch (error) {
+      res.status(400).json({ error: "Failed to create preset" });
+    }
+  });
+
   const httpServer = createServer(app);
 
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -44,6 +72,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const message = JSON.stringify({
       type: "state_update",
       state,
+    });
+
+    clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
+  };
+
+  const broadcastHistoryUpdate = async () => {
+    const history = await storage.getHistory(10);
+    const message = JSON.stringify({
+      type: "history_update",
+      history,
     });
 
     clients.forEach((client) => {
@@ -74,6 +116,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await new Promise(resolve => setTimeout(resolve, 1000));
         await storage.applyNextParameters();
         await broadcastState();
+        await broadcastHistoryUpdate();
       }
     }, 5000);
   };
@@ -95,6 +138,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     ws.send(JSON.stringify({
       type: "state_update",
       state: initialState,
+    }));
+
+    const initialHistory = await storage.getHistory(10);
+    ws.send(JSON.stringify({
+      type: "history_update",
+      history: initialHistory,
     }));
 
     if (!initialState.status.isConnected) {

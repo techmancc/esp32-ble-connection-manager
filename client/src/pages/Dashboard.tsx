@@ -2,10 +2,15 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { StatusPanel } from "@/components/StatusPanel";
 import { ConnectionParametersTable } from "@/components/ConnectionParametersTable";
+import { HistoryLog } from "@/components/HistoryLog";
+import { PresetSelector } from "@/components/PresetSelector";
+import { ParameterChart } from "@/components/ParameterChart";
+import { ExportButtons } from "@/components/ExportButtons";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useToast } from "@/hooks/use-toast";
 import { Cpu, Send, X, Loader2 } from "lucide-react";
-import type { DashboardState, UpdateParameters } from "@shared/schema";
+import { useQuery } from "@tanstack/react-query";
+import type { DashboardState, UpdateParameters, ParameterHistory, ParameterPreset } from "@shared/schema";
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -28,6 +33,8 @@ export default function Dashboard() {
     },
   });
 
+  const [history, setHistory] = useState<ParameterHistory[]>([]);
+
   const [nextValues, setNextValues] = useState({
     connectionIntervalMin: "",
     connectionIntervalMax: "",
@@ -38,6 +45,10 @@ export default function Dashboard() {
   const [isSending, setIsSending] = useState(false);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const previousNextRef = useRef<typeof state.parameters.next>(null);
+
+  const { data: presets = [] } = useQuery<ParameterPreset[]>({
+    queryKey: ["/api/presets"],
+  });
 
   useEffect(() => {
     if (state.parameters.next) {
@@ -79,6 +90,8 @@ export default function Dashboard() {
         const data = JSON.parse(event.data);
         if (data.type === "state_update") {
           setState(data.state);
+        } else if (data.type === "history_update") {
+          setHistory(data.history);
         } else if (data.type === "parameter_update_success") {
           toast({
             title: "Parameters Staged",
@@ -132,6 +145,20 @@ export default function Dashboard() {
     toast({
       title: "Cleared",
       description: "Next parameter values have been cleared.",
+    });
+  }, [toast]);
+
+  const handleApplyPreset = useCallback((preset: ParameterPreset) => {
+    setNextValues({
+      connectionIntervalMin: preset.connectionIntervalMin.toString(),
+      connectionIntervalMax: preset.connectionIntervalMax.toString(),
+      peripheralLatency: preset.peripheralLatency.toString(),
+      supervisionTimeout: preset.supervisionTimeout.toString(),
+    });
+    
+    toast({
+      title: "Preset Applied",
+      description: `${preset.name} parameters loaded into Next column. Click Send to apply.`,
     });
   }, [toast]);
 
@@ -218,7 +245,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-5xl">
+        <div className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl">
           <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-primary/10">
@@ -233,54 +260,80 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
-            <ThemeToggle />
+            <div className="flex items-center gap-2">
+              <ExportButtons state={state} history={history} />
+              <ThemeToggle />
+            </div>
           </div>
         </div>
       </header>
 
-      <main className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-5xl py-8">
-        <div className="space-y-8">
-          <section>
-            <h2 className="text-lg font-semibold mb-4">System Status</h2>
-            <StatusPanel status={state.status} />
-          </section>
+      <main className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+          <div className="lg:col-span-3 space-y-8">
+            <section>
+              <h2 className="text-lg font-semibold mb-4">System Status</h2>
+              <StatusPanel status={state.status} />
+            </section>
 
-          <section>
-            <h2 className="text-lg font-semibold mb-4">Connection Parameters</h2>
-            <ConnectionParametersTable
-              parameters={state.parameters}
-              nextValues={nextValues}
-              onNextValueChange={handleNextValueChange}
-            />
-          </section>
+            <section>
+              <h2 className="text-lg font-semibold mb-4">Connection Parameters</h2>
+              <ConnectionParametersTable
+                parameters={state.parameters}
+                nextValues={nextValues}
+                onNextValueChange={handleNextValueChange}
+              />
+            </section>
 
-          <section>
-            <div className="flex flex-col sm:flex-row gap-4 justify-end">
-              <Button
-                variant="outline"
-                onClick={handleClearNext}
-                disabled={!hasNextValues || isSending}
-                data-testid="button-clear-next"
-                className="w-full sm:w-auto"
-              >
-                <X className="h-4 w-4 mr-2" />
-                Clear Next
-              </Button>
-              <Button
-                onClick={handleSendNext}
-                disabled={!hasNextValues || isSending || !state.status.browserConnected}
-                data-testid="button-send-next"
-                className="w-full sm:w-auto"
-              >
-                {isSending ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4 mr-2" />
-                )}
-                {isSending ? "Sending..." : "Send Next"}
-              </Button>
-            </div>
-          </section>
+            <section>
+              <div className="flex flex-col sm:flex-row gap-4 justify-end">
+                <Button
+                  variant="outline"
+                  onClick={handleClearNext}
+                  disabled={!hasNextValues || isSending}
+                  data-testid="button-clear-next"
+                  className="w-full sm:w-auto"
+                >
+                  <X className="h-4 w-4 mr-2" />
+                  Clear Next
+                </Button>
+                <Button
+                  onClick={handleSendNext}
+                  disabled={!hasNextValues || isSending || !state.status.browserConnected}
+                  data-testid="button-send-next"
+                  className="w-full sm:w-auto"
+                >
+                  {isSending ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4 mr-2" />
+                  )}
+                  {isSending ? "Sending..." : "Send Next"}
+                </Button>
+              </div>
+            </section>
+
+            <section>
+              <h2 className="text-lg font-semibold mb-4">Parameter Trends</h2>
+              <ParameterChart history={history} />
+            </section>
+          </div>
+
+          <div className="lg:col-span-1 space-y-8">
+            <section>
+              <h2 className="text-lg font-semibold mb-4">Quick Presets</h2>
+              <PresetSelector
+                presets={presets}
+                onApplyPreset={handleApplyPreset}
+                disabled={isSending}
+              />
+            </section>
+
+            <section>
+              <h2 className="text-lg font-semibold mb-4">Parameter History</h2>
+              <HistoryLog history={history} />
+            </section>
+          </div>
         </div>
       </main>
     </div>

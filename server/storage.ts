@@ -1,10 +1,17 @@
-import type { ConnectionParameterSet, ESP32Status, DashboardState, UpdateParameters, ConnectionParameters } from "@shared/schema";
+import type { ConnectionParameterSet, ESP32Status, DashboardState, UpdateParameters, ConnectionParameters, ParameterHistory, InsertParameterHistory, ParameterPreset } from "@shared/schema";
+import { db } from "../db";
+import { parameterHistory, parameterPresets } from "@shared/schema";
+import { desc } from "drizzle-orm";
 
 export interface IStorage {
   getState(): Promise<DashboardState>;
   updateNextParameters(params: Partial<UpdateParameters>): Promise<DashboardState>;
   applyNextParameters(): Promise<DashboardState>;
   updateStatus(status: Partial<ESP32Status>): Promise<DashboardState>;
+  getHistory(limit?: number): Promise<ParameterHistory[]>;
+  addHistoryEntry(params: ConnectionParameters, source?: string): Promise<ParameterHistory>;
+  getPresets(): Promise<ParameterPreset[]>;
+  createPreset(preset: Omit<ParameterPreset, 'id' | 'createdAt'>): Promise<ParameterPreset>;
 }
 
 export class MemStorage implements IStorage {
@@ -54,6 +61,8 @@ export class MemStorage implements IStorage {
       this.state.parameters.previous = { ...this.state.parameters.current };
       this.state.parameters.current = { ...this.state.parameters.next };
       this.state.parameters.next = null;
+      
+      await this.addHistoryEntry(this.state.parameters.current, "esp32_auto");
     }
     
     return this.getState();
@@ -66,6 +75,45 @@ export class MemStorage implements IStorage {
     };
     
     return this.getState();
+  }
+
+  async getHistory(limit: number = 50): Promise<ParameterHistory[]> {
+    const history = await db
+      .select()
+      .from(parameterHistory)
+      .orderBy(desc(parameterHistory.appliedAt))
+      .limit(limit);
+    
+    return history;
+  }
+
+  async addHistoryEntry(params: ConnectionParameters, source: string = "manual"): Promise<ParameterHistory> {
+    const [entry] = await db
+      .insert(parameterHistory)
+      .values({
+        connectionIntervalMin: params.connectionIntervalMin,
+        connectionIntervalMax: params.connectionIntervalMax,
+        peripheralLatency: params.peripheralLatency,
+        supervisionTimeout: params.supervisionTimeout,
+        source,
+      })
+      .returning();
+    
+    return entry;
+  }
+
+  async getPresets(): Promise<ParameterPreset[]> {
+    const presets = await db.select().from(parameterPresets);
+    return presets;
+  }
+
+  async createPreset(preset: Omit<ParameterPreset, 'id' | 'createdAt'>): Promise<ParameterPreset> {
+    const [newPreset] = await db
+      .insert(parameterPresets)
+      .values(preset)
+      .returning();
+    
+    return newPreset;
   }
 }
 
