@@ -1,0 +1,16 @@
+Description of App to suggest connection parameters to a Client
+
+1) Using C++  language (for Arduino IDE and "ino" file format), create an ESP32 GATT server that connects to mobile phones using Bluetooth LE.  The ESP32 hardware acts as a Peripheral/GATT server to the mobile phone. The ESP32 sends “Connection_Parameter_Update_Requests” to the Bluetooth-connected phone using values obtained from a web-browser interface (WiFi interface) so that any web browser can interface with the ESP32 server as long as the hardware has WiFi.
+
+2) The ESP32 needs to store three sets of Connection Parameter values; old, current, next.
+
+Connection Parameters table (for web browser display):
+	Parameter			Previous		Current			Next
+Connection Interval (min.): 	300			280			100
+Connection Interval (max.): 	400 		350 		150
+Peripheral Latency (cnt.): 		3 			8			10
+SupervisionTimeout (ms): 		6200		3000		2400
+
+2) The Browser Interface over WiFi with the ESP32 server needs to display the Conn Parameter values in “ms” units and not in “1.25 ms counts” as Bluetooth specification instructs. ( This is to make it easier on the  reader (for readability. The ESP32 Server will need to receive )  
+3) On ‘system startup’ the “previous” column would be empty, the current column always reflects the present (phone implemented) Connection Parameter values either from the original Connection_Request, or the next set of Connection Parameters that the phone implements.  The older value is pushed to the “Previous” column.  The web-browser user is allowed to enter Conn Param values in the “Next” column.  A “send” button on the Browser web page allows the server to receive the “Next” set of Conn Param values, which the ESP32 GATT server sends to the Phone using the Peripheral Connection Paramaters Update Request.
+4) The web-browser interface needs indication fields to show if the ESP32 BLE is in the advertising state, is in the connected state. The Device Name that the ESP32 server is connected to. An  indication to show the browser is connected to the ESP32.  A button to “Clear Next”  column values,  a button to “Send Next” values to the ESP32 GATT server.
