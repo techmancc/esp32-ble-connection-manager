@@ -46,7 +46,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
       fullTime: format(new Date(entry.appliedAt), "MMM d, HH:mm:ss"),
       intervalMin: entry.connectionIntervalMin,
       intervalMax: entry.connectionIntervalMax,
-      latency: entry.peripheralLatency * 100,
+      latency: entry.peripheralLatency,
       timeout: entry.supervisionTimeout,
     }));
 
@@ -64,11 +64,8 @@ export function ParameterChart({ history }: ParameterChartProps) {
 
   return (
     <Card className="p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h3 className="text-base font-semibold">Parameter Trends</h3>
-          <p className="text-xs text-muted-foreground mt-1">Latency values scaled ×100 for visibility</p>
-        </div>
+      <div className="flex items-center justify-between mb-6">
+        <h3 className="text-base font-semibold">Parameter Trends</h3>
         <div className="flex gap-2">
           <Button
             variant={timeRange === "1h" ? "default" : "outline"}
@@ -119,10 +116,19 @@ export function ParameterChart({ history }: ParameterChartProps) {
               tick={{ fill: "hsl(var(--muted-foreground))" }}
             />
             <YAxis
+              yAxisId="left"
               className="text-xs"
               tick={{ fill: "hsl(var(--muted-foreground))" }}
               domain={[0, 'auto']}
-              allowDataOverflow={false}
+              label={{ value: 'Time (ms)', angle: -90, position: 'insideLeft', style: { fill: 'hsl(var(--muted-foreground))', fontSize: 12 } }}
+            />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              className="text-xs"
+              tick={{ fill: "hsl(var(--muted-foreground))" }}
+              domain={[0, 'auto']}
+              label={{ value: 'Latency (count)', angle: 90, position: 'insideRight', style: { fill: 'hsl(var(--muted-foreground))', fontSize: 12 } }}
             />
             <Tooltip
               contentStyle={{
@@ -139,13 +145,14 @@ export function ParameterChart({ history }: ParameterChartProps) {
                   return [`${value.toFixed(0)} ms`, "Timeout"];
                 }
                 if (name === "latency") {
-                  return [(value / 100).toFixed(0), "Latency (count)"];
+                  return [value.toString(), "Latency"];
                 }
                 return [`${value.toFixed(2)} ms`, name === "intervalMin" ? "Interval Min" : "Interval Max"];
               }}
             />
             <Legend />
             <Line
+              yAxisId="left"
               type="monotone"
               dataKey="intervalMin"
               stroke="hsl(var(--chart-1))"
@@ -154,6 +161,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
               dot={{ fill: "hsl(var(--chart-1))", r: 3 }}
             />
             <Line
+              yAxisId="left"
               type="monotone"
               dataKey="intervalMax"
               stroke="hsl(var(--chart-2))"
@@ -162,14 +170,16 @@ export function ParameterChart({ history }: ParameterChartProps) {
               dot={{ fill: "hsl(var(--chart-2))", r: 3 }}
             />
             <Line
+              yAxisId="right"
               type="monotone"
               dataKey="latency"
               stroke="hsl(var(--chart-3))"
               strokeWidth={2}
-              name="Latency (×100)"
+              name="Latency"
               dot={{ fill: "hsl(var(--chart-3))", r: 3 }}
             />
             <Line
+              yAxisId="left"
               type="monotone"
               dataKey="timeout"
               stroke="hsl(var(--chart-4))"
