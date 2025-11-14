@@ -46,7 +46,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
       fullTime: format(new Date(entry.appliedAt), "MMM d, HH:mm:ss"),
       intervalMin: entry.connectionIntervalMin,
       intervalMax: entry.connectionIntervalMax,
-      latency: entry.peripheralLatency,
+      latency: entry.peripheralLatency * 100,
       timeout: entry.supervisionTimeout,
     }));
 
@@ -64,8 +64,11 @@ export function ParameterChart({ history }: ParameterChartProps) {
 
   return (
     <Card className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <h3 className="text-base font-semibold">Parameter Trends</h3>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-base font-semibold">Parameter Trends</h3>
+          <p className="text-xs text-muted-foreground mt-1">Latency values scaled ×100 for visibility</p>
+        </div>
         <div className="flex gap-2">
           <Button
             variant={timeRange === "1h" ? "default" : "outline"}
@@ -118,6 +121,8 @@ export function ParameterChart({ history }: ParameterChartProps) {
             <YAxis
               className="text-xs"
               tick={{ fill: "hsl(var(--muted-foreground))" }}
+              domain={[0, 'auto']}
+              allowDataOverflow={false}
             />
             <Tooltip
               contentStyle={{
@@ -134,7 +139,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
                   return [`${value.toFixed(0)} ms`, "Timeout"];
                 }
                 if (name === "latency") {
-                  return [value.toString(), "Latency"];
+                  return [(value / 100).toFixed(0), "Latency (count)"];
                 }
                 return [`${value.toFixed(2)} ms`, name === "intervalMin" ? "Interval Min" : "Interval Max"];
               }}
@@ -161,7 +166,7 @@ export function ParameterChart({ history }: ParameterChartProps) {
               dataKey="latency"
               stroke="hsl(var(--chart-3))"
               strokeWidth={2}
-              name="Latency"
+              name="Latency (×100)"
               dot={{ fill: "hsl(var(--chart-3))", r: 3 }}
             />
             <Line
