@@ -47,7 +47,15 @@ export default function Dashboard() {
   const previousNextRef = useRef<typeof state.parameters.next>(null);
 
   const { data: presets = [] } = useQuery<ParameterPreset[]>({
-    queryKey: ["/api/presets"],
+    queryKey: ["presets"],
+    queryFn: async () => {
+      const baseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+      const response = await fetch(`${baseUrl}/api/presets`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch presets');
+      }
+      return response.json();
+    },
   });
 
   useEffect(() => {
@@ -77,8 +85,7 @@ export default function Dashboard() {
   }, [state.parameters.next, toast]);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.host}/ws`;
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {

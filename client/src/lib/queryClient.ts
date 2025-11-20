@@ -29,7 +29,12 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+    const url = queryKey.length > 1
+      ? `${baseUrl}${queryKey.join("/")}`  // For multi-part query keys
+      : `${baseUrl}/api/${queryKey[0]}`;   // For single query keys like "presets"
+
+    const res = await fetch(url, {
       credentials: "include",
     });
 

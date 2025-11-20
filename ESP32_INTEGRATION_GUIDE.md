@@ -220,7 +220,7 @@ bool hasNextParams = false;
 
 void setup() {
     Serial.begin(115200);
-    
+
     // Connect to WiFi
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
@@ -228,24 +228,24 @@ void setup() {
         Serial.print(".");
     }
     Serial.println("\nWiFi connected");
-    
+
     // Setup WebSocket
     webSocket.begin(wsHost, wsPort, "/ws");
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(5000);
-    
+
     // Initialize BLE
     initBLE();
 }
 
 void loop() {
     webSocket.loop();
-    
+
     // Check if BLE connection parameters need updating
     if (hasNextParams && isConnected) {
         applyConnectionParameters();
     }
-    
+
     // Send periodic state updates
     static unsigned long lastUpdate = 0;
     if (millis() - lastUpdate > 5000) {
@@ -260,11 +260,11 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             Serial.println("WebSocket Connected");
             sendStateUpdate();
             break;
-            
+
         case WStype_DISCONNECTED:
             Serial.println("WebSocket Disconnected");
             break;
-            
+
         case WStype_TEXT:
             handleWebSocketMessage((char*)payload);
             break;
@@ -274,17 +274,17 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 void handleWebSocketMessage(char* payload) {
     StaticJsonDocument<1024> doc;
     DeserializationError error = deserializeJson(doc, payload);
-    
+
     if (error) {
         Serial.println("JSON parse error");
         return;
     }
-    
+
     const char* type = doc["type"];
-    
+
     if (strcmp(type, "update_parameters") == 0) {
         JsonObject params = doc["parameters"];
-        
+
         // Store next parameters
         if (params.containsKey("connectionIntervalMin"))
             nextParams.intervalMin = params["connectionIntervalMin"];
@@ -294,9 +294,9 @@ void handleWebSocketMessage(char* payload) {
             nextParams.latency = params["peripheralLatency"];
         if (params.containsKey("supervisionTimeout"))
             nextParams.timeout = params["supervisionTimeout"];
-        
+
         hasNextParams = true;
-        
+
         // Send success confirmation
         sendParameterUpdateSuccess();
     }
@@ -305,19 +305,19 @@ void handleWebSocketMessage(char* payload) {
 void sendStateUpdate() {
     StaticJsonDocument<2048> doc;
     doc["type"] = "state_update";
-    
+
     JsonObject state = doc.createNestedObject("state");
-    
+
     // Parameters
     JsonObject parameters = state.createNestedObject("parameters");
-    
+
     // Current parameters
     JsonObject current = parameters.createNestedObject("current");
     current["connectionIntervalMin"] = currentParams.intervalMin;
     current["connectionIntervalMax"] = currentParams.intervalMax;
     current["peripheralLatency"] = currentParams.latency;
     current["supervisionTimeout"] = currentParams.timeout;
-    
+
     // Next parameters (if staged)
     if (hasNextParams) {
         JsonObject next = parameters.createNestedObject("next");
@@ -328,17 +328,17 @@ void sendStateUpdate() {
     } else {
         parameters["next"] = nullptr;
     }
-    
+
     // Previous parameters
     parameters["previous"] = nullptr;  // Track if needed
-    
+
     // Status
     JsonObject status = state.createNestedObject("status");
     status["isAdvertising"] = BLEDevice::getAdvertising()->isAdvertising();
     status["isConnected"] = isConnected;
     status["connectedDeviceName"] = connectedDeviceName;
     status["browserConnected"] = true;
-    
+
     String output;
     serializeJson(doc, output);
     webSocket.sendTXT(output);
@@ -347,7 +347,7 @@ void sendStateUpdate() {
 void sendParameterUpdateSuccess() {
     StaticJsonDocument<128> doc;
     doc["type"] = "parameter_update_success";
-    
+
     String output;
     serializeJson(doc, output);
     webSocket.sendTXT(output);
@@ -356,11 +356,11 @@ void sendParameterUpdateSuccess() {
 void applyConnectionParameters() {
     // Apply BLE connection parameter update
     // This is ESP32 BLE-specific implementation
-    
+
     // After successful application:
     currentParams = nextParams;
     hasNextParams = false;
-    
+
     // Send state update to reflect changes
     sendStateUpdate();
 }
@@ -375,13 +375,13 @@ The ESP32 can request connection parameter updates using the BLE stack:
 
 void applyConnectionParameters() {
     if (!isConnected) return;
-    
+
     // Convert milliseconds to BLE units
     uint16_t minInterval = (uint16_t)(nextParams.intervalMin / 1.25);
     uint16_t maxInterval = (uint16_t)(nextParams.intervalMax / 1.25);
     uint16_t latency = nextParams.latency;
     uint16_t timeout = (uint16_t)(nextParams.timeout / 10);
-    
+
     // Update connection parameters
     esp_ble_conn_update_params_t conn_params;
     memcpy(conn_params.bda, connectedDeviceAddress, sizeof(esp_bd_addr_t));
@@ -389,13 +389,13 @@ void applyConnectionParameters() {
     conn_params.max_int = maxInterval;
     conn_params.latency = latency;
     conn_params.timeout = timeout;
-    
+
     esp_ble_gap_update_conn_params(&conn_params);
-    
+
     // Update current parameters
     currentParams = nextParams;
     hasNextParams = false;
-    
+
     // Notify web interface
     sendStateUpdate();
 }
@@ -531,5 +531,5 @@ For questions about the web interface implementation, refer to the source code i
 
 ---
 
-**Version:** 1.0  
+**Version:** 1.0
 **Last Updated:** November 14, 2025

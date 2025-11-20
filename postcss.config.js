@@ -3,4 +3,9 @@ export default {
     tailwindcss: {},
     autoprefixer: {},
   },
+  map: {
+    inline: false,
+    annotation: true,
+    sourcesContent: true
+  }
 }
