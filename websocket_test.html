@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 WebSocket Test</title>
+</head>
+<body>
+    <h1>ESP32 WebSocket Connection Test</h1>
+    <div id="status">Testing connection...</div>
+    <div id="messages"></div>
+    
+    <script>
+        const statusDiv = document.getElementById('status');
+        const messagesDiv = document.getElementById('messages');
+        
+        function log(message) {
+            console.log(message);
+            messagesDiv.innerHTML += '<p>' + new Date().toLocaleTimeString() + ': ' + message + '</p>';
+        }
+        
+        try {
+            log('Attempting to connect to ws://192.168.4.1:81');
+            const socket = new WebSocket('ws://192.168.4.1:81');
+            
+            socket.onopen = function(event) {
+                statusDiv.textContent = 'Connected!';
+                statusDiv.style.color = 'green';
+                log('WebSocket connection opened');
+            };
+            
+            socket.onmessage = function(event) {
+                log('Received: ' + event.data);
+            };
+            
+            socket.onerror = function(event) {
+                statusDiv.textContent = 'Error!';
+                statusDiv.style.color = 'red';
+                log('WebSocket error: ' + JSON.stringify(event));
+            };
+            
+            socket.onclose = function(event) {
+                statusDiv.textContent = 'Disconnected';
+                statusDiv.style.color = 'orange';
+                log('WebSocket closed. Code: ' + event.code + ', Reason: ' + event.reason);
+            };
+            
+        } catch (error) {
+            statusDiv.textContent = 'Failed to create WebSocket';
+            statusDiv.style.color = 'red';
+            log('WebSocket creation error: ' + error.message);
+        }
+    </script>
+</body>
+</html>

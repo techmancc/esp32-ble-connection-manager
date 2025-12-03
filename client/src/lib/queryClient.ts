@@ -1,4 +1,5 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { discoverEsp32 } from "./utils";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
@@ -29,7 +30,7 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+    const baseUrl = await discoverEsp32();
     const url = queryKey.length > 1
       ? `${baseUrl}${queryKey.join("/")}`  // For multi-part query keys
       : `${baseUrl}/api/${queryKey[0]}`;   // For single query keys like "presets"

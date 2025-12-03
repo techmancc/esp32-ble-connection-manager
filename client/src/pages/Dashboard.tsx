@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { StatusPanel } from "@/components/StatusPanel";
+import { SecurityPanel } from "@/components/SecurityPanel";
 import { ConnectionParametersTable } from "@/components/ConnectionParametersTable";
 import { HistoryLog } from "@/components/HistoryLog";
 import { PresetSelector } from "@/components/PresetSelector";
@@ -10,6 +11,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { useToast } from "@/hooks/use-toast";
 import { Cpu, Send, X, Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { discoverEsp32, getWebSocketUrl } from "@/lib/utils";
 import type { DashboardState, UpdateParameters, ParameterHistory, ParameterPreset } from "@shared/schema";
 
 export default function Dashboard() {
@@ -49,7 +51,7 @@ export default function Dashboard() {
   const { data: presets = [] } = useQuery<ParameterPreset[]>({
     queryKey: ["presets"],
     queryFn: async () => {
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+      const baseUrl = await discoverEsp32();
       const response = await fetch(`${baseUrl}/api/presets`);
       if (!response.ok) {
         throw new Error('Failed to fetch presets');
@@ -85,56 +87,63 @@ export default function Dashboard() {
   }, [state.parameters.next, toast]);
 
   useEffect(() => {
-    const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.host}/ws`;
-    const socket = new WebSocket(wsUrl);
+    const connectWebSocket = () => {
+      // Use direct WebSocket URL for testing
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://192.168.4.1:81';
+      console.log('Attempting WebSocket connection to:', wsUrl);
+      const socket = new WebSocket(wsUrl);
 
-    socket.onopen = () => {
-      console.log("WebSocket connected");
-    };
+      socket.onopen = () => {
+        console.log("WebSocket connected to:", wsUrl);
+      };
 
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "state_update") {
-          setState(data.state);
-        } else if (data.type === "history_update") {
-          setHistory(data.history);
-        } else if (data.type === "parameter_update_success") {
-          toast({
-            title: "Parameters Staged",
-            description: "Connection parameters have been staged and will be applied by ESP32 in a few seconds.",
-          });
-          setIsSending(false);
-        } else if (data.type === "parameter_update_error") {
-          toast({
-            title: "Error",
-            description: data.error || "Failed to send parameters to ESP32.",
-            variant: "destructive",
-          });
-          setIsSending(false);
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "state_update") {
+            setState(data.state);
+          } else if (data.type === "history_update") {
+            setHistory(data.history);
+          } else if (data.type === "parameter_update_success") {
+            toast({
+              title: "Parameters Staged",
+              description: "Connection parameters have been staged and will be applied by ESP32 in a few seconds.",
+            });
+            setIsSending(false);
+          } else if (data.type === "parameter_update_error") {
+            toast({
+              title: "Error",
+              description: data.error || "Failed to send parameters to ESP32.",
+              variant: "destructive",
+            });
+            setIsSending(false);
+          }
+        } catch (error) {
+          console.error("Error parsing WebSocket message:", error);
         }
-      } catch (error) {
-        console.error("Error parsing WebSocket message:", error);
-      }
+      };
+
+      socket.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        toast({
+          title: "Connection Error",
+          description: "Failed to connect to ESP32 server.",
+          variant: "destructive",
+        });
+      };
+
+      socket.onclose = () => {
+        console.log("WebSocket disconnected, attempting to reconnect...");
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      setWs(socket);
     };
 
-    socket.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      toast({
-        title: "Connection Error",
-        description: "Failed to connect to ESP32 server.",
-        variant: "destructive",
-      });
-    };
-
-    socket.onclose = () => {
-      console.log("WebSocket disconnected");
-    };
-
-    setWs(socket);
+    connectWebSocket();
 
     return () => {
-      socket.close();
+      ws?.close();
     };
   }, [toast]);
 
@@ -327,6 +336,11 @@ export default function Dashboard() {
           </div>
 
           <div className="lg:col-span-1 space-y-8">
+            <section>
+              <h2 className="text-lg font-semibold mb-4">Bluetooth Security</h2>
+              <SecurityPanel ws={ws} />
+            </section>
+
             <section>
               <h2 className="text-lg font-semibold mb-4">Quick Presets</h2>
               <PresetSelector

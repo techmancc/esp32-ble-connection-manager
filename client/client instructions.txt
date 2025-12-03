@@ -1,85 +1,83 @@
-Perfect! The script shows that you're not currently connected to the ESP32 network (your PC shows 10.x.x.x IPs which are from your regular WiFi).
+🚀 ESP32 BLE Connection Parameter System - Client Setup
 
-🎯 Summary & Next Steps:
-Current Status:
-✅ ESP32 is running correctly in Access Point mode
-✅ ESP32 API endpoints work (/api/presets returns JSON)
-✅ React app is built and ready to serve
-❌ You need to connect to ESP32's WiFi to test the full dashboard
-What You Need to Do:
-Connect to ESP32 WiFi Network:
+UPDATED: Now supports both Access Point mode AND home WiFi connection!
 
-Network Name: ESP32-BLE-Control-9e9ef0
-Password: esp32ble
-Once Connected, Start React Dashboard:
+=== QUICK START (Home WiFi Mode - Recommended) ===
 
-Access the Dashboard:
+1. CONFIGURE ESP32 FOR HOME WIFI:
+   .\setup_home_wifi.ps1
 
-Find your PC's IP (will be 192.168.4.x)
-Open: http://[YOUR-PC-IP]:3000
-Test the Presets:
+   This script will:
+   - Find your ESP32 (AP mode or home network)
+   - Configure it to connect to your home WiFi
+   - Both ESP32 and your PC will be on the same network!
 
-The React dashboard should show all 4 presets with proper styling
-You can select presets and see real-time updates
-WebSocket connection should work for live parameter monitoring
-The ESP32 is working perfectly! Once you connect to its WiFi network and start the React dev server with network access, you should see the full-featured dashboard with all the presets working correctly.
+2. START DEVELOPMENT SERVER:
+   cd client
+   npm install
+   npm run dev -- --host
 
-The improved ESP32 web interface I uploaded will also provide helpful links to access your React dashboard once it's running.
+3. OPEN DASHBOARD:
+   http://localhost:5173
 
+   The client will automatically discover your ESP32's IP address!
 
+=== ALTERNATIVE: Access Point Mode ===
 
+If you prefer the old method or home WiFi doesn't work:
 
-(base) PS C:\Users\techm\OneDrive\Documents\Arduino\replit_conn_params_system> npm run dev
+1. CONNECT TO ESP32 NETWORK:
+   - WiFi Network: "ESP32-BLE-Control-XXXXXX" 
+   - Password: "esp32ble"
+   - Wait for connection (you'll get an IP like 192.168.4.2 or 192.168.4.3)
 
+2. VERIFY CONNECTION:
+   .\test_esp32_connectivity.ps1
 
+3. START CLIENT:
+   cd client
+   npm run dev -- --host
 
-This shows your PC has successfully connected to the ESP32 network and got IP address 192.168.4.3.
+4. ACCESS DASHBOARD:
+   http://192.168.4.1/ (ESP32's web interface with React app links)
+   OR your React dev server with automatic ESP32 discovery
 
-🎯 Test Your Dashboard Now!
-1. React Dashboard is Ready:
-Your full React dashboard should now be accessible at:
-http://192.168.4.3:3000/
+=== FEATURES ===
 
-2. Test the Presets:
-Open your browser
-Go to: http://192.168.4.3:3000/
-You should see the full React dashboard with:
-✅ Proper styling and CSS
-✅ All 4 presets: Low Power, Balanced, High Performance, Gaming
-✅ Real-time WebSocket connection to ESP32
-✅ Parameter controls and charts
-3. ESP32 Web Interface (Updated):
-You can also visit http://192.168.4.1/ which should now show the improved interface with:
+✅ Automatic ESP32 IP Discovery: Client automatically finds ESP32 whether in AP mode or home WiFi
+✅ Enhanced BLE Security: Device bonding, authentication, encrypted communications  
+✅ Robust Parameter Validation: BLE spec compliance with retry limits and rollback
+✅ Real-time Monitoring: WebSocket updates for live parameter changes
+✅ Modern UI: React + TailwindCSS with dark/light themes
+✅ Export Data: JSON/CSV export of parameters and history
+✅ Preset Management: Save and load parameter configurations
+✅ Network Flexibility: Works with both ESP32 AP mode and home WiFi connection
 
-Styled webpage with buttons to access your React dashboard
-Direct links to http://192.168.4.3:3000/
-API endpoint links
-4. Expected Results:
-Presets should load from http://192.168.4.1/api/presets
-WebSocket should connect to ws://192.168.4.1:81
-Real-time updates when you select different presets
-Full dashboard functionality with charts and parameter controls
-Try accessing http://192.168.4.3:3000/ in your browser now - the presets should appear correctly with the full React interface!
+=== TROUBLESHOOTING ===
 
+Problem: Client can't connect to ESP32
+Solution: 
+1. Try the WiFi setup script: .\setup_home_wifi.ps1
+2. Check ESP32 Serial Monitor (115200 baud) for network status
+3. Use ESP32's WiFi config page: http://[ESP32-IP]/wificonfig
 
-for client:
-npm run dev -- -- host  
+Problem: ESP32 not found
+Solution:
+1. Check ESP32 is powered and programmed
+2. Look for "ESP32-BLE-Control-XXXXXX" WiFi network
+3. Check your router's connected devices list
+4. Try network scan: nmap -sn 192.168.1.0/24
 
-#typical output follows:
+Problem: Parameters not applying
+Solution:
+1. Check BLE device is connected in Security panel
+2. Verify parameter values are within BLE specification ranges  
+3. Check ESP32 Serial Monitor for validation messages
 
+=== ESP32 NETWORK STATUS ===
 
-> rest-express@1.0.0 dev
-> vite
+The ESP32 will show network information on Serial Monitor:
+- Home WiFi: Shows assigned IP address (192.168.1.x, 10.0.0.x, etc.)
+- AP Mode: Shows "Access Point started" with IP 192.168.4.1
 
-
-  VITE v5.4.20  ready in 433 ms
-
-  ➜  Local:   http://localhost:3000/
-  ➜  Network: http://172.28.240.1:3000/
-  ➜  Network: http://172.21.96.1:3000/
-  ➜  Network: http://192.168.4.2:3000/
-  ➜  Network: http://192.168.4.4:3000/
-  ➜  press h + enter to show help
-
-
-Use the last IP address to get the dashboard showing in the browser.
+Both modes support the full dashboard and API functionality!

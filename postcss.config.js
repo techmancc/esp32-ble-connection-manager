@@ -1,11 +1,6 @@
+import tailwindcss from 'tailwindcss'
+import autoprefixer from 'autoprefixer'
+
 export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
-  map: {
-    inline: false,
-    annotation: true,
-    sourcesContent: true
-  }
+  plugins: [tailwindcss, autoprefixer],
 }
