@@ -84,13 +84,14 @@ Write-Host "🔧 Configuring Home WiFi Connection..." -ForegroundColor Cyan
 Write-Host ""
 
 # Get WiFi credentials from user
-$ssid = Read-Host "PrincessAndMoana"
+Write-Host "Enter your home WiFi credentials:" -ForegroundColor Cyan
+$ssid = Read-Host "WiFi Network Name (SSID)"
 if ([string]::IsNullOrWhiteSpace($ssid)) {
     Write-Host "❌ SSID cannot be empty!" -ForegroundColor Red
     exit 1
 }
 
-$password = Read-Host "0urC@tCalli3_1" -AsSecureString
+$password = Read-Host "WiFi Password" -AsSecureString
 $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
 
 Write-Host ""

@@ -847,6 +847,65 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           broadcastSecurityStatus();
         }
       }
+      else if (doc["type"] == "apply_parameters") {
+        Serial.println("WebSocket: Applying parameters to BLE connection");
+        
+        if (!hasNextParams) {
+          DynamicJsonDocument response(256);
+          response["type"] = "apply_parameters_error";
+          response["error"] = "No parameters to apply";
+          String responseStr;
+          serializeJson(response, responseStr);
+          webSocket.sendTXT(num, responseStr);
+        } else if (!deviceConnected) {
+          DynamicJsonDocument response(256);
+          response["type"] = "apply_parameters_error";
+          response["error"] = "No BLE device connected";
+          String responseStr;
+          serializeJson(response, responseStr);
+          webSocket.sendTXT(num, responseStr);
+        } else {
+          // Apply parameters using existing logic
+          storedParams = nextParams;
+          saveStoredParams();
+          hasNextParams = false;
+          
+          // Apply to BLE connection
+          uint16_t minUnits = (uint16_t)(storedParams.minInterval / 1.25);
+          uint16_t maxUnits = (uint16_t)(storedParams.maxInterval / 1.25);
+          uint16_t timeoutUnits = (uint16_t)(storedParams.supervisionTimeout / 10.0);
+          
+          Serial.printf("Sending BLE updateConnParams: min=%u, max=%u, latency=%d, timeout=%u\n", 
+                        minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+          
+          pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+          
+          // Send success response
+          DynamicJsonDocument response(256);
+          response["type"] = "apply_parameters_success";
+          response["message"] = "Parameters applied to BLE connection";
+          String responseStr;
+          serializeJson(response, responseStr);
+          webSocket.sendTXT(num, responseStr);
+          
+          // Broadcast updated state
+          broadcastState();
+        }
+      }
+      else if (doc["type"] == "clear_parameters") {
+        Serial.println("WebSocket: Clearing next parameters");
+        hasNextParams = false;
+        nextParams = {0, 0, 0, 0};
+        
+        DynamicJsonDocument response(256);
+        response["type"] = "clear_parameters_success";
+        response["message"] = "Next parameters cleared";
+        String responseStr;
+        serializeJson(response, responseStr);
+        webSocket.sendTXT(num, responseStr);
+        
+        broadcastState();
+      }
       break;
     }
 
@@ -948,6 +1007,109 @@ void handleApiPresets() {
     preset["supervisionTimeout"] = presets[i].supervisionTimeout;
   }
 
+  String response;
+  serializeJson(doc, response);
+  webServer.send(200, "application/json", response);
+}
+
+void handleApiWifiStatus() {
+  // Add CORS headers
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  DynamicJsonDocument doc(1024);
+  
+  // Current WiFi status
+  doc["mode"] = (WiFi.getMode() == WIFI_STA) ? "STA" : 
+                (WiFi.getMode() == WIFI_AP) ? "AP" : 
+                (WiFi.getMode() == WIFI_AP_STA) ? "AP_STA" : "OFF";
+  
+  if (WiFi.getMode() == WIFI_STA || WiFi.getMode() == WIFI_AP_STA) {
+    doc["sta"]["connected"] = (WiFi.status() == WL_CONNECTED);
+    if (WiFi.status() == WL_CONNECTED) {
+      doc["sta"]["ssid"] = WiFi.SSID();
+      doc["sta"]["ip"] = WiFi.localIP().toString();
+      doc["sta"]["rssi"] = WiFi.RSSI();
+      doc["sta"]["mac"] = WiFi.macAddress();
+    }
+    doc["sta"]["status"] = WiFi.status();
+  }
+  
+  if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+    doc["ap"]["active"] = true;
+    doc["ap"]["ssid"] = WiFi.softAPSSID();
+    doc["ap"]["ip"] = WiFi.softAPIP().toString();
+    doc["ap"]["clients"] = WiFi.softAPgetStationNum();
+    doc["ap"]["mac"] = WiFi.softAPmacAddress();
+  }
+  
+  // Stored credentials info (without passwords)
+  preferences.begin("ble_cfg", true);
+  String stored_ssid = preferences.getString("ssid", "");
+  String last_ip = preferences.getString("last_ip", "");
+  String last_error = preferences.getString("last_error", "");
+  unsigned long long last_connect = preferences.getULong64("last_connect", 0);
+  preferences.end();
+  
+  doc["stored"]["hasCredentials"] = (stored_ssid.length() > 0);
+  if (stored_ssid.length() > 0) {
+    doc["stored"]["ssid"] = stored_ssid;
+    doc["stored"]["lastSuccessfulIP"] = last_ip;
+    doc["stored"]["lastConnectTime"] = last_connect;
+    doc["stored"]["lastError"] = last_error;
+  }
+  
+  doc["uptime"] = millis();
+  
+  String response;
+  serializeJson(doc, response);
+  webServer.send(200, "application/json", response);
+}
+
+void handleApiDashboard() {
+  // Add CORS headers
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+  
+  DynamicJsonDocument doc(1024);
+  
+  // Determine network mode and generate appropriate dashboard URLs
+  bool isAPMode = (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA);
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+  
+  doc["esp32IP"] = isAPMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  doc["networkMode"] = isAPMode ? "AP" : "STA";
+  doc["wsEndpoint"] = "ws://" + doc["esp32IP"].as<String>() + ":81";
+  
+  if (isAPMode) {
+    doc["networkName"] = WiFi.softAPSSID();
+    doc["networkType"] = "Access Point";
+    // AP mode dashboard URLs
+    JsonArray dashboardURLs = doc.createNestedArray("dashboardURLs");
+    dashboardURLs.add("http://192.168.4.2:5173/");
+    dashboardURLs.add("http://192.168.4.3:5173/");
+    dashboardURLs.add("http://192.168.4.100:5173/");
+  } else if (isConnected) {
+    doc["networkName"] = WiFi.SSID();
+    doc["networkType"] = "Home WiFi";
+    doc["signal"] = WiFi.RSSI();
+    
+    // Generate smart dashboard URLs based on current IP
+    String esp32IP = WiFi.localIP().toString();
+    String ipBase = esp32IP;
+    int lastDot = ipBase.lastIndexOf('.');
+    if (lastDot > 0) {
+      ipBase = ipBase.substring(0, lastDot);
+      
+      JsonArray dashboardURLs = doc.createNestedArray("dashboardURLs");
+      dashboardURLs.add("http://" + ipBase + ".5:5173/");
+      dashboardURLs.add("http://" + ipBase + ".1:5173/");
+      dashboardURLs.add("http://" + ipBase + ".100:5173/");
+      dashboardURLs.add("http://" + ipBase + ".101:5173/");
+    }
+  }
+  
+  doc["instructions"] = "Run 'npm run dev -- --host' then try the dashboard URLs";
+  doc["timestamp"] = millis();
+  
   String response;
   serializeJson(doc, response);
   webServer.send(200, "application/json", response);
@@ -1155,23 +1317,59 @@ void handleSaveWifi() {
   if (webServer.hasArg("ssid")) {
     String ss = webServer.arg("ssid");
     String pw = webServer.arg("pass");
-    Serial.printf("Saving new WiFi credentials: SSID='%s'\n", ss.c_str());
-    // store in preferences
+    Serial.printf("💾 Saving new WiFi credentials: SSID='%s'\n", ss.c_str());
+    
+    // Store in preferences
     preferences.begin("ble_cfg", false);
     preferences.putString("ssid", ss);
     preferences.putString("pass", pw);
     preferences.end();
 
-    // attempt to connect
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ss.c_str(), pw.c_str());
-    Serial.println("Attempting to connect with new credentials...");
-
-    // Give it a short time then redirect to root
-    delay(2000);
+    // Send response with status page
+    String html = "<html><head><title>WiFi Configuration</title>"
+                 "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                 "<style>body{font-family:Arial,sans-serif;max-width:500px;margin:50px auto;padding:20px;text-align:center}"
+                 ".status{padding:20px;margin:20px 0;border-radius:8px;background:#fff3cd;border:1px solid #ffeaa7}"
+                 ".success{background:#d4edda;border:1px solid #c3e6cb;color:#155724}"
+                 "</style>"
+                 "<script>"
+                 "let countdown = 10;"
+                 "function updateCounter() {"
+                 "  document.getElementById('counter').innerText = countdown;"
+                 "  if (countdown <= 0) {"
+                 "    window.location.href = '/';"
+                 "  } else {"
+                 "    countdown--;"
+                 "    setTimeout(updateCounter, 1000);"
+                 "  }"
+                 "}"
+                 "window.onload = updateCounter;"
+                 "</script></head><body>"
+                 "<h1>🔄 WiFi Configuration Saved</h1>"
+                 "<div class='status'>"
+                 "<p>📡 Network: <strong>" + ss + "</strong></p>"
+                 "<p>⏳ ESP32 will restart and attempt to connect...</p>"
+                 "<p>🔄 Redirecting in <span id='counter'>10</span> seconds...</p>"
+                 "</div>"
+                 "<h3>📋 Next Steps:</h3>"
+                 "<p>1. ESP32 will restart and try to connect to your home WiFi</p>"
+                 "<p>2. If successful, find the new IP address on your router</p>"
+                 "<p>3. If failed, ESP32 will return to Access Point mode</p>"
+                 "<p>4. Check serial monitor for connection status</p>"
+                 "</body></html>";
+    
+    webServer.send(200, "text/html", html);
+    
+    Serial.println("📡 WiFi credentials saved. Restarting in 3 seconds...");
+    Serial.println("🔄 ESP32 will attempt to connect to home WiFi after restart");
+    Serial.println("⚠️  If connection fails, ESP32 will return to Access Point mode");
+    
+    // Schedule restart to apply new WiFi settings
+    delay(3000);
+    ESP.restart();
+  } else {
+    webServer.send(400, "text/html", "<h1>Error</h1><p>Missing SSID parameter</p>");
   }
-  webServer.sendHeader("Location", "/");
-  webServer.send(302, "text/plain", "");
 }
 
 // Serve static files for the client
@@ -1181,7 +1379,50 @@ void serveClientFiles() {
     if (webServer.uri().startsWith("/api")) {
       webServer.send(404, "application/json", "{\"error\":\"API endpoint not found\"}");
     } else {
-      // Serve a smart redirect page that tries to find the React dev server
+      // Generate dynamic dashboard page based on current network mode
+      String networkInfo;
+      String dashboardLinks;
+      String esp32IP;
+      String wsEndpoint;
+      
+      if (WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
+        // Access Point mode
+        networkInfo = "📡 Network: ESP32-BLE-Control Access Point";
+        esp32IP = "192.168.4.1";
+        wsEndpoint = "ws://192.168.4.1:81";
+        
+        dashboardLinks = 
+          "<p>Try these React Dashboard links (depending on your PC's IP):</p>"
+          "<a href='http://192.168.4.2:5173/' class='button'>Dashboard (IP .2)</a>"
+          "<a href='http://192.168.4.3:5173/' class='button'>Dashboard (IP .3)</a>"
+          "<a href='http://192.168.4.100:5173/' class='button'>Dashboard (IP .100)</a><br>";
+      } else {
+        // Station mode (connected to home WiFi)
+        String ssid = WiFi.SSID();
+        IPAddress localIP = WiFi.localIP();
+        esp32IP = localIP.toString();
+        wsEndpoint = "ws://" + esp32IP + ":81";
+        
+        networkInfo = "🏠 Network: Connected to " + ssid;
+        
+        // Extract network base (e.g., "10.0.0" from "10.0.0.67")
+        String ipBase = esp32IP;
+        int lastDot = ipBase.lastIndexOf('.');
+        if (lastDot > 0) {
+          ipBase = ipBase.substring(0, lastDot);
+        }
+        
+        dashboardLinks = 
+          "<p>🎯 <strong>Smart Dashboard Links for your network (" + ipBase + ".x):</strong></p>"
+          "<a href='http://" + ipBase + ".5:5173/' class='button' target='_blank'>📱 Dashboard (.5)</a>"
+          "<a href='http://" + ipBase + ".1:5173/' class='button' target='_blank'>💻 Dashboard (.1)</a>"
+          "<a href='http://" + ipBase + ".100:5173/' class='button' target='_blank'>🖥️ Dashboard (.100)</a>"
+          "<a href='http://" + ipBase + ".101:5173/' class='button' target='_blank'>📟 Dashboard (.101)</a><br>"
+          "<div style='margin:15px 0;padding:10px;background:#fff3cd;border:1px solid #ffeaa7;border-radius:5px;'>"
+          "💡 <strong>Quick Start:</strong> Run <code>npm run dev -- --host</code> in your project folder, then click a dashboard link above!"
+          "</div>";
+      }
+
       webServer.send(200, "text/html",
         "<html><head><title>ESP32 BLE Dashboard</title>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -1196,12 +1437,9 @@ void serveClientFiles() {
         "<div class='card'>"
         "<h1>🚀 ESP32 BLE Configuration Dashboard</h1>"
         "<div class='status success'>✅ ESP32 API Server Running</div>"
-        "<div class='status info'>📡 Network: ESP32-BLE-Control Access Point</div>"
+        "<div class='status info'>" + networkInfo + "</div>"
         "<h3>Quick Access:</h3>"
-        "<p>Try these React Dashboard links (depending on your PC's IP):</p>"
-        "<a href='http://192.168.4.2:5173/' class='button'>Dashboard (IP .2)</a>"
-        "<a href='http://192.168.4.3:5173/' class='button'>Dashboard (IP .3)</a>"
-        "<a href='http://192.168.4.100:5173/' class='button'>Dashboard (IP .100)</a><br>"
+        + dashboardLinks +
         "<h3>Manual Access:</h3>"
         "<p>If the above links don't work:</p>"
         "<ol>"
@@ -1214,10 +1452,11 @@ void serveClientFiles() {
         "<li><a href='/api/state'>GET /api/state</a> - Current system state</li>"
         "<li><a href='/api/history'>GET /api/history</a> - Parameter history</li>"
         "<li><a href='/api/presets'>GET /api/presets</a> - Available presets ✅</li>"
+        "<li><a href='/api/dashboard'>GET /api/dashboard</a> - Smart dashboard URLs 🎯</li>"
         "<li>POST /api/parameters/apply - Apply staged parameters</li>"
-        "<li>WebSocket: <code>ws://192.168.4.1:81</code> for real-time updates</li>"
+        "<li>WebSocket: <code>" + wsEndpoint + "</code> for real-time updates</li>"
         "</ul>"
-        "<p><small>ESP32 IP: 192.168.4.1 | Time: " + String(millis()/1000) + "s</small></p>"
+        "<p><small>ESP32 IP: " + esp32IP + " | Time: " + String(millis()/1000) + "s</small></p>"
         "</div></body></html>");
     }
   });
@@ -1228,6 +1467,8 @@ void setupWebServer() {
   webServer.on("/api/state", HTTP_GET, handleApiState);
   webServer.on("/api/history", HTTP_GET, handleApiHistory);
   webServer.on("/api/presets", HTTP_GET, handleApiPresets);
+  webServer.on("/api/wifi", HTTP_GET, handleApiWifiStatus);
+  webServer.on("/api/dashboard", HTTP_GET, handleApiDashboard);
   webServer.on("/api/parameters/apply", HTTP_POST, handleApiApplyParameters);
 
   // Security API routes
@@ -1255,6 +1496,13 @@ void setupWebServer() {
   });
 
   webServer.on("/api/presets", HTTP_OPTIONS, []() {
+    webServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    webServer.send(200);
+  });
+
+  webServer.on("/api/wifi", HTTP_OPTIONS, []() {
     webServer.sendHeader("Access-Control-Allow-Origin", "*");
     webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1310,11 +1558,17 @@ void setupWiFi() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(stored_ssid.c_str(), stored_pass.c_str());
     
-    // Wait up to 10 seconds for connection
+    // Wait up to 15 seconds for connection with better feedback
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    int maxAttempts = 30; // 15 seconds
+    
+    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
       delay(500);
-      Serial.print(".");
+      if (attempts % 4 == 0) {
+        Serial.printf("🔄 Connection attempt %d/%d...\n", (attempts/4) + 1, maxAttempts/4);
+      } else {
+        Serial.print(".");
+      }
       attempts++;
     }
     
@@ -1325,13 +1579,30 @@ void setupWiFi() {
       Serial.printf("🌐 IP Address: %s\n", localIP.toString().c_str());
       Serial.printf("💻 Web Dashboard: http://%s/\n", localIP.toString().c_str());
       Serial.printf("📊 WebSocket: ws://%s:81\n", localIP.toString().c_str());
+      Serial.printf("🔧 WiFi Config: http://%s/wificonfig\n", localIP.toString().c_str());
       Serial.printf("🏠 Both ESP32 and your PC are now on the same network!\n");
       Serial.printf("🚀 Start React dev server with: npm run dev -- --host\n");
       Serial.printf("📱 Then open: http://localhost:5173 or http://%s:5173\n", localIP.toString().c_str());
+      
+      // Store successful connection info for troubleshooting
+      preferences.begin("ble_cfg", false);
+      preferences.putString("last_ip", localIP.toString());
+      preferences.putULong64("last_connect", millis());
+      preferences.end();
+      
       return;
     } else {
-      Serial.println("\n❌ Failed to connect to stored WiFi");
+      Serial.printf("\n❌ Failed to connect to '%s' (Reason: %d)\n", stored_ssid.c_str(), WiFi.status());
+      Serial.println("💡 Common issues:");
+      Serial.println("   - Incorrect password");
+      Serial.println("   - Network out of range");
+      Serial.println("   - Router temporarily unavailable");
       Serial.println("🔄 Falling back to Access Point mode...");
+      
+      // Clear failed credentials to prevent boot loops
+      preferences.begin("ble_cfg", false);
+      preferences.putString("last_error", "Connection failed - code " + String(WiFi.status()));
+      preferences.end();
     }
   } else {
     Serial.println("🔍 No stored WiFi credentials found");

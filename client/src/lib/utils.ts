@@ -22,10 +22,12 @@ export async function discoverEsp32(): Promise<string> {
   }
 
   // Get fallback URLs
-  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://192.168.4.1";
+  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://10.0.0.67";
 
   // Auto-discovery: Try common ESP32 IP patterns
   const candidateIPs = [
+    // Known ESP32 IP (current session)
+    "10.0.0.67",
     // Access Point mode
     "192.168.4.1",
     // Common home router ranges for DHCP

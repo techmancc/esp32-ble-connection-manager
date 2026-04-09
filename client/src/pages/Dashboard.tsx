@@ -89,7 +89,7 @@ export default function Dashboard() {
   useEffect(() => {
     const connectWebSocket = () => {
       // Use direct WebSocket URL for testing
-      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://192.168.4.1:81';
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://10.0.0.67:81';
       console.log('Attempting WebSocket connection to:', wsUrl);
       const socket = new WebSocket(wsUrl);
 
@@ -105,11 +105,38 @@ export default function Dashboard() {
           } else if (data.type === "history_update") {
             setHistory(data.history);
           } else if (data.type === "parameter_update_success") {
+            // Parameters staged - now apply them to BLE connection
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "apply_parameters" }));
+            }
             toast({
-              title: "Parameters Staged",
-              description: "Connection parameters have been staged and will be applied by ESP32 in a few seconds.",
+              title: "Parameters Staged", 
+              description: "Parameters staged, applying to BLE connection...",
+            });
+          } else if (data.type === "apply_parameters_success") {
+            toast({
+              title: "Success!",
+              description: "Connection parameters applied to BLE device successfully.",
             });
             setIsSending(false);
+            setNextValues({
+              connectionIntervalMin: "",
+              connectionIntervalMax: "",
+              peripheralLatency: "",
+              supervisionTimeout: "",
+            });
+          } else if (data.type === "apply_parameters_error") {
+            toast({
+              title: "Apply Error",
+              description: data.error || "Failed to apply parameters to BLE connection.",
+              variant: "destructive",
+            });
+            setIsSending(false);
+          } else if (data.type === "clear_parameters_success") {
+            toast({
+              title: "Cleared",
+              description: "Next parameters cleared successfully.",
+            });
           } else if (data.type === "parameter_update_error") {
             toast({
               title: "Error",
@@ -158,11 +185,17 @@ export default function Dashboard() {
       peripheralLatency: "",
       supervisionTimeout: "",
     });
+    
+    // Send clear command to ESP32
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "clear_parameters" }));
+    }
+    
     toast({
       title: "Cleared",
       description: "Next parameter values have been cleared.",
     });
-  }, [toast]);
+  }, [ws, toast]);
 
   const handleApplyPreset = useCallback((preset: ParameterPreset) => {
     setNextValues({

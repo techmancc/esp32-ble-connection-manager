@@ -48,10 +48,10 @@ Write-Host ""
 Write-Host "3️⃣ Searching for ESP32 on home network..." -ForegroundColor Cyan
 
 # Get current PC's IP to determine network range
-$pcIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { 
+$pcIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
     $_.InterfaceAlias -ne "Loopback Pseudo-Interface 1" -and
     $_.IPAddress -ne "127.0.0.1" -and
-    $_.IPAddress -notlike "169.254.*" 
+    $_.IPAddress -notlike "169.254.*"
 } | Select-Object -First 1).IPAddress
 
 Write-Host "   Your PC IP: $pcIP" -ForegroundColor White
@@ -59,10 +59,10 @@ Write-Host "   Your PC IP: $pcIP" -ForegroundColor White
 if ($pcIP) {
     $networkPrefix = ($pcIP -split '\.')[0..2] -join '.'
     Write-Host "   Scanning network: $networkPrefix.xxx" -ForegroundColor White
-    
+
     $candidateIPs = 100..110 | ForEach-Object { "$networkPrefix.$_" }
     $esp32Found = $false
-    
+
     foreach ($ip in $candidateIPs) {
         Write-Host "   Testing $ip..." -ForegroundColor Gray -NoNewline
         try {
@@ -79,7 +79,7 @@ if ($pcIP) {
             Write-Host " ❌" -ForegroundColor Red
         }
     }
-    
+
     if (-not $esp32Found) {
         Write-Host "❌ ESP32 not found on home network" -ForegroundColor Red
     }
@@ -95,7 +95,7 @@ try {
     $reactResponse = Invoke-WebRequest -Uri "http://localhost:5173" -TimeoutSec 2 -ErrorAction SilentlyContinue
     if ($reactResponse.StatusCode -eq 200) {
         Write-Host "✅ React server running at http://localhost:5173" -ForegroundColor Green
-        
+
         # Also check network interface
         if ($pcIP) {
             $networkUrl = "http://" + $pcIP + ":5173"
