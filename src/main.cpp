@@ -70,6 +70,11 @@ struct SecurityStatus {
   int pairedDeviceCount;
 };
 
+struct WiFiCredentials {
+  String ssid;
+  String pass;
+};
+
 // Globals
 Preferences preferences;
 ConnectionParams storedParams;
@@ -149,6 +154,40 @@ static inline uint16_t ms_to_timeout_units(float ms) {
 }
 static inline float timeout_units_to_ms(uint16_t u) {
   return u * 10.0f;
+}
+
+static String sanitizeCredential(String value) {
+  value.trim();
+  if (value.length() > 0) {
+    if (value.charAt(0) == '"' || value.charAt(0) == '\'') {
+      value = value.substring(1);
+      value.trim();
+    }
+  }
+  if (value.length() > 0) {
+    char last = value.charAt(value.length() - 1);
+    if (last == '"' || last == '\'') {
+      value = value.substring(0, value.length() - 1);
+      value.trim();
+    }
+  }
+  return value;
+}
+
+static WiFiCredentials loadStoredWiFiCredentials() {
+  WiFiCredentials creds;
+  preferences.begin("ble_cfg", true);
+  creds.ssid = sanitizeCredential(preferences.getString("ssid", ""));
+  creds.pass = sanitizeCredential(preferences.getString("pass", ""));
+  preferences.end();
+  return creds;
+}
+
+static void saveStoredWiFiCredentials(const String& ssid, const String& pass) {
+  preferences.begin("ble_cfg", false);
+  preferences.putString("ssid", sanitizeCredential(ssid));
+  preferences.putString("pass", sanitizeCredential(pass));
+  preferences.end();
 }
 
 // Security Callback Class
@@ -1043,8 +1082,9 @@ void handleApiWifiStatus() {
   }
   
   // Stored credentials info (without passwords)
+  WiFiCredentials creds = loadStoredWiFiCredentials();
+  String stored_ssid = creds.ssid;
   preferences.begin("ble_cfg", true);
-  String stored_ssid = preferences.getString("ssid", "");
   String last_ip = preferences.getString("last_ip", "");
   String last_error = preferences.getString("last_error", "");
   unsigned long long last_connect = preferences.getULong64("last_connect", 0);
@@ -1315,15 +1355,12 @@ void handleWifiPage() {
 
 void handleSaveWifi() {
   if (webServer.hasArg("ssid")) {
-    String ss = webServer.arg("ssid");
-    String pw = webServer.arg("pass");
+    String ss = sanitizeCredential(webServer.arg("ssid"));
+    String pw = sanitizeCredential(webServer.arg("pass"));
     Serial.printf("💾 Saving new WiFi credentials: SSID='%s'\n", ss.c_str());
     
     // Store in preferences
-    preferences.begin("ble_cfg", false);
-    preferences.putString("ssid", ss);
-    preferences.putString("pass", pw);
-    preferences.end();
+    saveStoredWiFiCredentials(ss, pw);
 
     // Send response with status page
     String html = "<html><head><title>WiFi Configuration</title>"
@@ -1545,10 +1582,9 @@ void setupWebServer() {
 
 void setupWiFi() {
   // Load stored WiFi credentials
-  preferences.begin("ble_cfg", true);
-  String stored_ssid = preferences.getString("ssid", "");
-  String stored_pass = preferences.getString("pass", "");
-  preferences.end();
+  WiFiCredentials creds = loadStoredWiFiCredentials();
+  String stored_ssid = creds.ssid;
+  String stored_pass = creds.pass;
 
   // Try to connect to stored WiFi first
   if (stored_ssid.length() > 0) {

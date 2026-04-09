@@ -197,8 +197,8 @@ Recommended libraries:
 
 ```cpp
 // WiFi credentials
-const char* ssid = "your-wifi-ssid";
-const char* password = "your-wifi-password";
+const char* ssid = "PrincessAndMoana-2.4G-ext";
+const char* password = "0urC@tCalli3_1";
 
 // WebSocket server
 const char* wsHost = "192.168.1.100";  // Your server IP
@@ -222,12 +222,15 @@ void setup() {
     Serial.begin(115200);
 
     // Connect to WiFi
+    WiFi.mode(WIFI_STA); // Add this line!
+    Serial.println("placing ESP32 WiFi in STA-Mode");
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
     }
     Serial.println("\nWiFi connected");
+    Serial.println(WiFi.ssid);
 
     // Setup WebSocket
     webSocket.begin(wsHost, wsPort, "/ws");
