@@ -79,12 +79,17 @@ ConnectionParams nextParams = {0, 0, 0, 0}; // Parameters to be applied next
 bool hasNextParams = false;
 bool hasPreviousParams = false;
 
-NimBLEServer* pServer = nullptr;
-NimBLEService* pService = nullptr;
-NimBLECharacteristic* pMinCharacteristic = nullptr;
-NimBLECharacteristic* pMaxCharacteristic = nullptr;
-NimBLECharacteristic* pTimeoutCharacteristic = nullptr;
-NimBLECharacteristic* pLatencyCharacteristic = nullptr;
+// BLE Client globals (changed from Server)
+NimBLEClient* pClient = nullptr;
+NimBLEScan* pScan = nullptr;
+bool doConnect = false;
+bool isConnected = false;
+bool doScan = false;
+
+// Connected peripheral info
+String connectedDeviceAddress = "";
+String connectedDeviceName = "None";
+uint16_t currentConnHandle = 0;
 
 WebServer webServer(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
@@ -103,10 +108,9 @@ ParameterPreset presets[] = {
 };
 int presetCount = 4;
 
-bool deviceConnected = false;
-uint16_t currentConnHandle = 0xffff;  // invalid
+// Connection status (removed deviceConnected, using isConnected from client globals)
 
-// Security and Pairing globals
+// Security and Pairing globals  
 SecurityStatus securityStatus;
 PairedDevice pairedDevices[10]; // Maximum 10 paired devices
 int pairedDeviceCount = 0;
@@ -412,184 +416,95 @@ void saveStoredParams() {
 }
 
 // BLE server callbacks
-class ServerCallbacks : public NimBLEServerCallbacks {
+// BLE Client callbacks
+class ClientCallbacks : public NimBLEClientCallbacks {
 public:
-  void onConnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
-    deviceConnected = true;
-    currentConnHandle = desc->conn_handle;
-    currentConnectedAddress = NimBLEAddress(desc->peer_ota_addr);
+  void onConnect(NimBLEClient* pclient) override {
+    isConnected = true;
+    currentConnHandle = pclient->getConnId();
+    connectedDeviceAddress = pclient->getPeerAddress().toString().c_str();
+    connectedDeviceName = "BLE Device"; // Default name, can be updated later
 
-    Serial.printf("BLE Client connected (conn handle %u, address: %s)\n",
-                  currentConnHandle, currentConnectedAddress.toString().c_str());
+    Serial.printf("Connected to BLE peripheral (conn handle %u, address: %s)\n",
+                  currentConnHandle, connectedDeviceAddress.c_str());
 
-    // Check if device is paired when authentication is required
-    if (securityStatus.requireAuthentication) {
-      isDeviceAuthenticated = isDevicePaired(currentConnectedAddress);
-      if (!isDeviceAuthenticated) {
-        Serial.println("Unknown device - initiating pairing process");
-        securityStatus.isPairing = true;
-        securityStatus.pairingDeviceAddress = currentConnectedAddress.toString().c_str();
-        broadcastSecurityStatus();
-      } else {
-        Serial.println("Known paired device connected");
-        // Mark device as authenticated
-        for (int i = 0; i < pairedDeviceCount; i++) {
-          if (pairedDevices[i].address == currentConnectedAddress.toString().c_str()) {
-            pairedDevices[i].authenticated = true;
-            break;
-          }
-        }
-        isDeviceAuthenticated = true;
-      }
-    } else {
-      isDeviceAuthenticated = true; // Allow all devices when auth not required
-    }
-
-    // Apply connection parameters
+    // Apply connection parameters as client
     Serial.printf("Requesting conn params: min=%.2f max=%.2f latency=%d timeout=%.0f\n",
                   storedParams.minInterval, storedParams.maxInterval, storedParams.slaveLatency, storedParams.supervisionTimeout);
+    
     uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
     uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
     uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-    server->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+    
+    // Update connection parameters (client requesting from peripheral)
+    pClient->updateConnParams(minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
 
     lastRequestedParams = storedParams;
     broadcastState();
     broadcastSecurityStatus();
   }
 
-  void onDisconnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
-    (void)server;
-    (void)desc;
-    deviceConnected = false;
+  void onDisconnect(NimBLEClient* pclient) override {
+    (void)pclient;
+    isConnected = false;
     currentConnHandle = 0xffff;
-    isDeviceAuthenticated = false;
-    currentConnectedAddress = NimBLEAddress("");
+    connectedDeviceAddress = "";
+    connectedDeviceName = "None";
 
-    // Clear authentication status for all devices
-    for (int i = 0; i < pairedDeviceCount; i++) {
-      pairedDevices[i].authenticated = false;
-    }
-
-    Serial.println("BLE Client disconnected");
-    securityStatus.isPairing = false;
-    securityStatus.currentPin = "";
+    Serial.println("Disconnected from BLE peripheral");
     broadcastState();
     broadcastSecurityStatus();
+    
+    // Start scanning again after disconnect
+    doScan = true;
   }
 };
 
-// Characteristic callbacks: write updates storedParams and save
-class ParamCharCallbacks : public NimBLECharacteristicCallbacks {
+// Advertised Device callbacks for scanning
+class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 public:
-  void onWrite(NimBLECharacteristic* pCharacteristic) override {
-    // Check if authentication is required and device is authenticated
-    if (securityStatus.requireAuthentication && !isDeviceAuthenticated) {
-      Serial.println("Unauthorized write attempt - device not authenticated");
-      return;
-    }
-
-    std::string v = pCharacteristic->getValue();
-    const char* uuid = pCharacteristic->getUUID().toString().c_str();
-    if (v.size() != sizeof(uint16_t)) {
-      Serial.println("Invalid write size");
-      return;
-    }
-    if (v.size() >= 2) {
-      uint16_t val = (uint8_t)v[1];
-      val = (val << 8) | (uint8_t)v[0];
-
-      if (pCharacteristic == pMinCharacteristic) {
-        uint16_t units = ms_to_conn_interval_units(storedParams.minInterval);
-        storedParams.minInterval = conn_interval_units_to_ms(val);
-        Serial.printf("Characteristic write: minInterval = %.2f ms\n", storedParams.minInterval);
-      } else if (pCharacteristic == pMaxCharacteristic) {
-        uint16_t units = ms_to_conn_interval_units(storedParams.maxInterval);
-        storedParams.maxInterval = conn_interval_units_to_ms(val);
-        Serial.printf("Characteristic write: maxInterval = %.2f ms\n", storedParams.maxInterval);
-      } else if (pCharacteristic == pTimeoutCharacteristic) {
-        uint16_t units = ms_to_timeout_units(storedParams.supervisionTimeout);
-        storedParams.supervisionTimeout = timeout_units_to_ms(val);
-        Serial.printf("Characteristic write: supervisionTimeout = %.0f ms\n", storedParams.supervisionTimeout);
-      } else if (pCharacteristic == pLatencyCharacteristic) {
-        storedParams.slaveLatency = val;
-        Serial.printf("Characteristic write: slaveLatency = %d\n", storedParams.slaveLatency);
+  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+    // Auto-connect to first connectable device found
+    if (advertisedDevice->isConnectable() && !isConnected && doConnect) {
+      pScan->stop();
+      
+      Serial.printf("Found connectable device: %s\n", advertisedDevice->toString().c_str());
+      
+      // Create client and connect
+      pClient = NimBLEDevice::createClient();
+      pClient->setClientCallbacks(new ClientCallbacks(), false);
+      
+      if (pClient->connect(advertisedDevice)) {
+        Serial.println("Connected to peripheral");
+        doConnect = false;
+      } else {
+        Serial.println("Failed to connect to peripheral");
+        doScan = true; // Resume scanning
       }
-      saveStoredParams();
-      addToHistory("BLE (Authenticated)");
-
-      // If a central is connected, immediately request the update
-      if (deviceConnected && pServer && currentConnHandle != 0xffff) {
-        Serial.println("Device connected: sending updateConnParams with newly saved params");
-        uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-        uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-        uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-        pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
-        lastRequestedParams = storedParams;
-      }
-
-      broadcastState();
     }
   }
 };
 
-// Setup BLE peripheral service and characteristics
+// Setup BLE Client for connecting to peripherals
 void setupBLE() {
-  NimBLEDevice::init("BLE_Config_Server");
-  // allow for larger than 23 bytes of BLE message.
-  NimBLEDevice::setMTU(100);  // or desired value
+  NimBLEDevice::init("ESP32_BLE_Client_Manager");
+  NimBLEDevice::setMTU(100);  // Allow larger BLE messages
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
-  // Setup BLE Security first
+  // Setup BLE Security
   setupBLESecurity();
 
-  pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
+  // Initialize BLE Scan
+  pScan = NimBLEDevice::getScan();
+  pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
+  pScan->setActiveScan(true); // Active scan uses more power but gets results faster
+  pScan->setInterval(100);    // Scan interval in 0.625ms units
+  pScan->setWindow(99);       // Scan window in 0.625ms units (must be <= interval)
 
-  pService = pServer->createService(SERVICE_UUID);
-
-  // Create characteristics with appropriate security properties
-  uint32_t properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE;
-  if (securityStatus.requireAuthentication) {
-    properties |= NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_ENC;
-  }
-
-  pMinCharacteristic = pService->createCharacteristic(MIN_INTERVAL_UUID, properties);
-  pMaxCharacteristic = pService->createCharacteristic(MAX_INTERVAL_UUID, properties);
-  pTimeoutCharacteristic = pService->createCharacteristic(SUPERVISION_TO_UUID, properties);
-  pLatencyCharacteristic = pService->createCharacteristic(SLAVE_LATENCY_UUID, properties);
-
-  ParamCharCallbacks* cb = new ParamCharCallbacks();
-  pMinCharacteristic->setCallbacks(cb);
-  pMaxCharacteristic->setCallbacks(cb);
-  pTimeoutCharacteristic->setCallbacks(cb);
-  pLatencyCharacteristic->setCallbacks(cb);
-
-  // Initialize characteristic values from stored params
-  uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-  uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-  uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-  uint16_t latency = storedParams.slaveLatency;
-
-  pMinCharacteristic->setValue((const uint8_t*)&minUnits, sizeof(minUnits));
-  pMaxCharacteristic->setValue((const uint8_t*)&maxUnits, sizeof(maxUnits));
-  pTimeoutCharacteristic->setValue((const uint8_t*)&timeoutUnits, sizeof(timeoutUnits));
-  pLatencyCharacteristic->setValue((const uint8_t*)&latency, sizeof(latency));
-
-  pService->start();
-
-  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  // Add service UUID (will be added in advertising payload)
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  // Keep the advertisement payload small to avoid exceeding 31 bytes.
-  // Use a short device name and put optional data in the scan response.
-  NimBLEAdvertisementData advData;
-  advData.setName("BLE_CFG_Secure");  // Updated name to indicate security
-  pAdvertising->setAdvertisementData(advData);
-  pAdvertising->setScanResponseData(advData);
-  NimBLEDevice::startAdvertising();
-
-  Serial.println("BLE Config Server Ready and Advertising with Security");
+  // Start scanning for peripherals
+  doScan = true;
+  
+  Serial.println("BLE Client Manager Ready - Scanning for peripherals...");
 }
 
 void setupBLESecurity() {
@@ -654,13 +569,13 @@ void broadcastState() {
 
   // Status
   JsonObject status = state.createNestedObject("status");
-  status["isAdvertising"] = !deviceConnected; // Advertising when not connected
-  status["isConnected"] = deviceConnected;
-  status["connectedDeviceName"] = deviceConnected ? "BLE Device" : nullptr;
+  status["isAdvertising"] = false; // Client mode - no advertising
+  status["isConnected"] = isConnected;
+  status["connectedDeviceName"] = isConnected ? connectedDeviceName.c_str() : nullptr;
   status["browserConnected"] = true; // Always true if we're broadcasting
   status["deviceAuthenticated"] = isDeviceAuthenticated;
   status["requiresAuthentication"] = securityStatus.requireAuthentication;
-  if (deviceConnected && !currentConnectedAddress.toString().empty()) {
+  if (isConnected && !connectedDeviceAddress.isEmpty()) {
     status["connectedDeviceAddress"] = currentConnectedAddress.toString().c_str();
   } else {
     status["connectedDeviceAddress"] = nullptr;
@@ -857,7 +772,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           String responseStr;
           serializeJson(response, responseStr);
           webSocket.sendTXT(num, responseStr);
-        } else if (!deviceConnected) {
+        } else if (!isConnected) {
           DynamicJsonDocument response(256);
           response["type"] = "apply_parameters_error";
           response["error"] = "No BLE device connected";
@@ -878,7 +793,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           Serial.printf("Sending BLE updateConnParams: min=%u, max=%u, latency=%d, timeout=%u\n", 
                         minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
           
-          pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+          pClient->updateConnParams(minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
           
           // Send success response
           DynamicJsonDocument response(256);
@@ -951,9 +866,9 @@ void handleApiState() {
 
   // Status
   JsonObject status = doc.createNestedObject("status");
-  status["isAdvertising"] = !deviceConnected;
-  status["isConnected"] = deviceConnected;
-  status["connectedDeviceName"] = deviceConnected ? "BLE Device" : nullptr;
+  status["isAdvertising"] = false; // Client mode
+  status["isConnected"] = isConnected;
+  status["connectedDeviceName"] = isConnected ? connectedDeviceName.c_str() : nullptr;
   status["browserConnected"] = true;
 
   String response;
@@ -1182,17 +1097,12 @@ void handleApiApplyParameters() {
     uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
     uint16_t latency = storedParams.slaveLatency;
 
-    pMinCharacteristic->setValue((const uint8_t*)&minUnits, sizeof(minUnits));
-    pMaxCharacteristic->setValue((const uint8_t*)&maxUnits, sizeof(maxUnits));
-    pTimeoutCharacteristic->setValue((const uint8_t*)&timeoutUnits, sizeof(timeoutUnits));
-    pLatencyCharacteristic->setValue((const uint8_t*)&latency, sizeof(latency));
-
-    Serial.printf("Updated characteristics: Min=%d, Max=%d, Latency=%d, Timeout=%d\n",
+    Serial.printf("Preparing connection parameters: Min=%d, Max=%d, Latency=%d, Timeout=%d\n",
                   minUnits, maxUnits, latency, timeoutUnits);
 
     // If connected, update connection parameters with enhanced error handling
-    if (deviceConnected && pServer && currentConnHandle != 0xffff) {
-      Serial.println("Applying new params to connected BLE central");
+    if (isConnected && pClient && currentConnHandle != 0xffff) {
+      Serial.println("Applying new params to connected BLE peripheral");
 
       // Check if device is authenticated (if required)
       if (securityStatus.requireAuthentication && !isDeviceAuthenticated) {
@@ -1205,7 +1115,7 @@ void handleApiApplyParameters() {
         webServer.send(200, "application/json", warningResponse);
       } else {
         // Apply to active connection
-        pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+        pClient->updateConnParams(minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
         lastRequestedParams = storedParams;
         Serial.printf("Successfully requested connection parameter update: Min=%.1f, Max=%.1f, Latency=%d, Timeout=%.1f\n",
                       storedParams.minInterval, storedParams.maxInterval, storedParams.slaveLatency, storedParams.supervisionTimeout);
@@ -1666,6 +1576,14 @@ void loop() {
   webServer.handleClient();
   webSocket.loop();
 
+  // BLE Client scanning and connection management
+  if (doScan && !isConnected) {
+    Serial.println("Starting BLE scan for peripherals...");
+    pScan->start(5, false); // Scan for 5 seconds, don't continue previous scan
+    doScan = false;
+    doConnect = true; // Ready to connect when device found
+  }
+
   // Check if we need to apply next parameters with retry limit
   static unsigned long lastParamCheck = 0;
   static int paramRetryCount = 0;
@@ -1704,7 +1622,7 @@ void loop() {
     lastStatusMs = now;
     Serial.print("Status: ");
     Serial.printf("connected=%s, connHandle=%u, authenticated=%s, paired_devices=%d, ",
-                  deviceConnected ? "true" : "false", currentConnHandle,
+                  isConnected ? "true" : "false", currentConnHandle,
                   isDeviceAuthenticated ? "true" : "false", pairedDeviceCount);
     Serial.printf("stored[min=%.2fms,max=%.2fms,sto=%.0fms,lat=%d], lastRequested[min=%.2fms,max=%.2fms,sto=%.0fms,lat=%d]\n",
                   storedParams.minInterval, storedParams.maxInterval, storedParams.supervisionTimeout, storedParams.slaveLatency,
@@ -1712,6 +1630,12 @@ void loop() {
 
     // Broadcast current state periodically
     broadcastState();
+  }
+
+  // Restart scanning if disconnected and not already scanning
+  if (!isConnected && !doScan && !doConnect && millis() - lastStatusMs > 10000) {
+    Serial.println("No connection - restarting scan...");
+    doScan = true;
   }
 
   delay(10);
