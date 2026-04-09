@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "PlatformIO: Build",
+      "type": "shell",
+      "command": "${userHome}/.platformio/penv/Scripts/pio.exe",
+      "args": ["run"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Upload", 
+      "type": "shell",
+      "command": "${userHome}/.platformio/penv/Scripts/pio.exe",
+      "args": ["run", "--target", "upload"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "PlatformIO: Monitor",
+      "type": "shell", 
+      "command": "${userHome}/.platformio/penv/Scripts/pio.exe",
+      "args": ["device", "monitor"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
