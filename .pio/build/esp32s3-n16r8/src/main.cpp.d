@@ -253,6 +253,7 @@
  .pio/libdeps/esp32s3-n16r8/NimBLE-Arduino/src/NimBLE2904.h \
  .pio/libdeps/esp32s3-n16r8/NimBLE-Arduino/src/NimBLESecurity.h \
  C:/Users/techm/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/bt/include/esp32c3/include/esp_bt.h \
+ .pio/libdeps/esp32s3-n16r8/NimBLE-Arduino/src/NimBLESecurity.h \
  C:/Users/techm/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src/Preferences.h \
  C:/Users/techm/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
  C:/Users/techm/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \

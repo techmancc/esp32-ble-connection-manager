@@ -4,5 +4,7 @@
 			"path": ".."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"nrf5-vscode.seggerEmbeddedStudioPath": "C:\\Program Files\\SEGGER\\SEGGER Embedded Studio 8.10d"
+	}
 }
