@@ -6,8 +6,28 @@
 Write-Host "🧪 ESP32 API Test Script" -ForegroundColor Cyan
 Write-Host "========================" -ForegroundColor Cyan
 
-$esp32IP = "192.168.4.1"
-$baseUrl = "http://$esp32IP"
+$workspaceRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$envLocalPath = Join-Path $workspaceRoot "client/.env.local"
+
+$baseUrl = ""
+if (Test-Path $envLocalPath) {
+    $apiLine = Get-Content -Path $envLocalPath | Where-Object { $_ -match '^VITE_API_BASE_URL=' } | Select-Object -First 1
+    if ($apiLine) {
+        $baseUrl = ($apiLine -replace '^VITE_API_BASE_URL=', '').Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($baseUrl)) {
+    $baseUrl = "http://192.168.4.1"
+}
+
+try {
+    $baseUri = [System.Uri]$baseUrl
+    $esp32IP = $baseUri.Host
+} catch {
+    $esp32IP = "192.168.4.1"
+    $baseUrl = "http://$esp32IP"
+}
 
 Write-Host "`n📡 Testing ESP32 API at: $baseUrl" -ForegroundColor Yellow
 

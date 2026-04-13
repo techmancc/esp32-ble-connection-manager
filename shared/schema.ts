@@ -23,6 +23,32 @@ export interface ESP32Status {
   isConnected: boolean;
   connectedDeviceName: string | null;
   browserConnected: boolean;
+  scanFilterEnabled?: boolean;
+  scanFilterName?: string | null;
+  isScanning?: boolean;
+}
+
+export interface BleScanDevice {
+  address: string;
+  name: string | null;
+  rssi: number;
+  connectable: boolean;
+  lastSeenMs: number;
+}
+
+export interface BleCharacteristicSummary {
+  uuid: string;
+  canRead: boolean;
+  canWrite: boolean;
+  canNotify: boolean;
+  canIndicate: boolean;
+  canWriteNoResponse: boolean;
+}
+
+export interface BleServiceSummary {
+  uuid: string;
+  characteristicCount: number;
+  characteristics: BleCharacteristicSummary[];
 }
 
 export interface DashboardState {

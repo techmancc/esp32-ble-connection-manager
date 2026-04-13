@@ -8,11 +8,13 @@ import { PresetSelector } from "@/components/PresetSelector";
 import { ParameterChart } from "@/components/ParameterChart";
 import { ExportButtons } from "@/components/ExportButtons";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { BleClientControlPanel } from "@/components/BleClientControlPanel";
+import { BleServicesPanel } from "@/components/BleServicesPanel";
 import { useToast } from "@/hooks/use-toast";
 import { Cpu, Send, X, Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { discoverEsp32, getWebSocketUrl } from "@/lib/utils";
-import type { DashboardState, UpdateParameters, ParameterHistory, ParameterPreset } from "@shared/schema";
+import type { BleScanDevice, BleServiceSummary, DashboardState, UpdateParameters, ParameterHistory, ParameterPreset } from "@shared/schema";
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -32,6 +34,9 @@ export default function Dashboard() {
       isConnected: false,
       connectedDeviceName: null,
       browserConnected: false,
+      scanFilterEnabled: false,
+      scanFilterName: null,
+      isScanning: false,
     },
   });
 
@@ -46,6 +51,11 @@ export default function Dashboard() {
 
   const [isSending, setIsSending] = useState(false);
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const [discoveredDevices, setDiscoveredDevices] = useState<BleScanDevice[]>([]);
+  const [discoveredServices, setDiscoveredServices] = useState<BleServiceSummary[]>([]);
+  const [servicesInProgress, setServicesInProgress] = useState(false);
+  const [servicesError, setServicesError] = useState<string | null>(null);
+  const [negotiatedMtu, setNegotiatedMtu] = useState<number | null>(null);
   const previousNextRef = useRef<typeof state.parameters.next>(null);
 
   const { data: presets = [] } = useQuery<ParameterPreset[]>({
@@ -89,19 +99,39 @@ export default function Dashboard() {
   useEffect(() => {
     const connectWebSocket = () => {
       // Use direct WebSocket URL for testing
-      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://10.0.0.67:81';
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://192.168.11.109:81';
       console.log('Attempting WebSocket connection to:', wsUrl);
       const socket = new WebSocket(wsUrl);
 
       socket.onopen = () => {
         console.log("WebSocket connected to:", wsUrl);
+        setState((prev) => ({
+          ...prev,
+          status: {
+            ...prev.status,
+            browserConnected: true,
+          },
+        }));
       };
 
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === "state_update") {
-            setState(data.state);
+            setState({
+              ...data.state,
+              status: {
+                ...data.state.status,
+                browserConnected: true,
+              },
+            });
+          } else if (data.type === "ble_scan_results") {
+            setDiscoveredDevices(Array.isArray(data.devices) ? data.devices : []);
+          } else if (data.type === "ble_services_update") {
+            setDiscoveredServices(Array.isArray(data.services) ? data.services : []);
+            setServicesInProgress(Boolean(data.inProgress));
+            setServicesError(typeof data.error === "string" && data.error.length > 0 ? data.error : null);
+            setNegotiatedMtu(typeof data.mtu === "number" && data.mtu > 0 ? data.mtu : null);
           } else if (data.type === "history_update") {
             setHistory(data.history);
           } else if (data.type === "parameter_update_success") {
@@ -137,6 +167,19 @@ export default function Dashboard() {
               title: "Cleared",
               description: "Next parameters cleared successfully.",
             });
+          } else if (data.type === "ble_command_response") {
+            if (data.success) {
+              toast({
+                title: "BLE Command Sent",
+                description: `Command '${data.command}' completed successfully.`,
+              });
+            } else {
+              toast({
+                title: "BLE Command Failed",
+                description: data.error || `Command '${data.command}' failed.`,
+                variant: "destructive",
+              });
+            }
           } else if (data.type === "parameter_update_error") {
             toast({
               title: "Error",
@@ -152,6 +195,13 @@ export default function Dashboard() {
 
       socket.onerror = (error) => {
         console.error("WebSocket error:", error);
+        setState((prev) => ({
+          ...prev,
+          status: {
+            ...prev.status,
+            browserConnected: false,
+          },
+        }));
         toast({
           title: "Connection Error",
           description: "Failed to connect to ESP32 server.",
@@ -161,6 +211,18 @@ export default function Dashboard() {
 
       socket.onclose = () => {
         console.log("WebSocket disconnected, attempting to reconnect...");
+        setState((prev) => ({
+          ...prev,
+          status: {
+            ...prev.status,
+            browserConnected: false,
+          },
+        }));
+        setDiscoveredDevices([]);
+        setDiscoveredServices([]);
+        setServicesInProgress(false);
+        setServicesError(null);
+        setNegotiatedMtu(null);
         setTimeout(connectWebSocket, 3000);
       };
 
@@ -294,7 +356,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-background">
       <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl">
+        <div className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-[96rem]">
           <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-md bg-primary/10">
@@ -317,9 +379,9 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-7xl py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-          <div className="lg:col-span-3 space-y-8">
+      <main className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-[96rem] py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-8 space-y-8">
             <section>
               <h2 className="text-lg font-semibold mb-4">System Status</h2>
               <StatusPanel status={state.status} />
@@ -368,7 +430,21 @@ export default function Dashboard() {
             </section>
           </div>
 
-          <div className="lg:col-span-1 space-y-8">
+          <div className="lg:col-span-4 space-y-8 min-w-0 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:pr-1">
+            <section>
+              <BleClientControlPanel ws={ws} status={state.status} devices={discoveredDevices} />
+            </section>
+
+            <section>
+              <BleServicesPanel
+                connected={state.status.isConnected}
+                services={discoveredServices}
+                inProgress={servicesInProgress}
+                error={servicesError}
+                negotiatedMtu={negotiatedMtu}
+              />
+            </section>
+
             <section>
               <h2 className="text-lg font-semibold mb-4">Bluetooth Security</h2>
               <SecurityPanel ws={ws} />
