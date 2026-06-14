@@ -31,7 +31,7 @@ cd esp32-ble-connection-manager
 # For BLE Server mode (original):
 git checkout main
 
-# For BLE Client mode (new):  
+# For BLE Client mode (new):
 git checkout esp32-ble-client-manager
 ```
 
@@ -54,6 +54,8 @@ pio device monitor         # Serial monitor
    - Password: `esp32ble`
 2. **Open Web Dashboard:** `http://192.168.4.1`
 3. **Configure BLE parameters and test**
+
+> Note: this repository contains both BLE “server/peripheral” and BLE “client/central” firmware architectures. The dashboard expects the firmware WebSocket to be available on the same ESP32 host at port `81`.
 
 ## 📡 **BLE Server Mode** (Original Architecture)
 
@@ -91,7 +93,7 @@ BLE Central Device → Updates Parameters → ESP32 Connection
 ### **Connection Flow**
 ```
 ESP32 (Central) → Scans & Connects → BLE Peripheral Device
-ESP32 → Updates Parameters → Peripheral Connection  
+ESP32 → Updates Parameters → Peripheral Connection
 ```
 
 ## 🎛️ Dashboard Features
@@ -104,7 +106,7 @@ ESP32 → Updates Parameters → Peripheral Connection
 
 ### **Monitoring & Analysis**
 - ✅ Real-time connection status
-- ✅ Parameter history tracking with timestamps  
+- ✅ Parameter history tracking with timestamps
 - ✅ Export data (JSON, CSV formats)
 - ✅ WebSocket-based live updates
 - ✅ Security status and pairing management
@@ -180,7 +182,7 @@ The ESP32 can operate in multiple WiFi modes:
 ```cpp
 // Modify in src/main.cpp for custom settings
 #define DEFAULT_MIN_CONN_INTERVAL 240     // 300ms
-#define DEFAULT_MAX_CONN_INTERVAL 384     // 480ms  
+#define DEFAULT_MAX_CONN_INTERVAL 384     // 480ms
 #define DEFAULT_SUPERVISION_TIMEOUT 5620  // 5620ms
 #define DEFAULT_SLAVE_LATENCY 4
 ```
@@ -194,7 +196,7 @@ The ESP32 can operate in multiple WiFi modes:
 4. Monitor power consumption changes
 5. Find optimal parameters for your application
 
-### **Client Mode: Testing BLE Device Compatibility**  
+### **Client Mode: Testing BLE Device Compatibility**
 1. Flash client firmware
 2. Connect target BLE device (watch, sensor, etc.)
 3. ESP32 automatically discovers and connects
@@ -213,7 +215,7 @@ The ESP32 can operate in multiple WiFi modes:
 
 ### **Server Architecture Components**
 - NimBLE Server with configurable services/characteristics
-- WebSocket server for real-time dashboard communication  
+- WebSocket server for real-time dashboard communication
 - BLE Security Manager for pairing/bonding
 - Parameter validation and history tracking
 
@@ -263,7 +265,7 @@ Successfully requested connection parameter update: Min=250.0, Max=300.0, Latenc
 
 ### **Dashboard Status Indicators**
 - 🟢 **Connected:** Active BLE connection established
-- 🟡 **Scanning:** Discovering BLE devices (client mode)  
+- 🟡 **Scanning:** Discovering BLE devices (client mode)
 - 🔴 **Disconnected:** No active BLE connection
 - 🔐 **Authenticated:** Secure pairing completed
 - ⚡ **Parameter Applied:** Connection parameters updated successfully
@@ -300,6 +302,6 @@ This project is open-source and available under the MIT License.
 
 ## 🎉 **Ready to get started?**
 
-Choose your architecture mode, flash the firmware, and start optimizing BLE connections! 
+Choose your architecture mode, flash the firmware, and start optimizing BLE connections!
 
 For questions or issues, check the [troubleshooting section](#-monitoring--debugging) or create a GitHub issue.

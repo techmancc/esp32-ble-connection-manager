@@ -76,22 +76,24 @@ export default function Dashboard() {
         peripheralLatency: "",
         supervisionTimeout: "",
       });
-      
+
       toast({
         title: "Parameters Applied",
         description: "ESP32 has successfully applied the new connection parameters.",
       });
-      
+
       previousNextRef.current = null;
     }
   }, [state.parameters.next, toast]);
 
   useEffect(() => {
-    const connectWebSocket = () => {
-      // Use direct WebSocket URL for testing
-      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://10.0.0.67:81';
+    const connectWebSocket = async () => {
+      // Discover ESP32 REST base URL, then derive WS URL from it
+      const baseUrl = await discoverEsp32();
+      const wsUrl = getWebSocketUrl(baseUrl);
       console.log('Attempting WebSocket connection to:', wsUrl);
       const socket = new WebSocket(wsUrl);
+
 
       socket.onopen = () => {
         console.log("WebSocket connected to:", wsUrl);
@@ -110,7 +112,7 @@ export default function Dashboard() {
               socket.send(JSON.stringify({ type: "apply_parameters" }));
             }
             toast({
-              title: "Parameters Staged", 
+              title: "Parameters Staged",
               description: "Parameters staged, applying to BLE connection...",
             });
           } else if (data.type === "apply_parameters_success") {
@@ -185,12 +187,12 @@ export default function Dashboard() {
       peripheralLatency: "",
       supervisionTimeout: "",
     });
-    
+
     // Send clear command to ESP32
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "clear_parameters" }));
     }
-    
+
     toast({
       title: "Cleared",
       description: "Next parameter values have been cleared.",
@@ -204,7 +206,7 @@ export default function Dashboard() {
       peripheralLatency: preset.peripheralLatency.toString(),
       supervisionTimeout: preset.supervisionTimeout.toString(),
     });
-    
+
     toast({
       title: "Preset Applied",
       description: `${preset.name} parameters loaded into Next column. Click Send to apply.`,
