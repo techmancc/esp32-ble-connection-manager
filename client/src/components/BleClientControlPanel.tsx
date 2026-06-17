@@ -18,6 +18,10 @@ export function BleClientControlPanel({ ws, status, devices }: BleClientControlP
   const { toast } = useToast();
   const [scanFilterName, setScanFilterName] = useState("");
   const [expandedScanList, setExpandedScanList] = useState(false);
+  const normalizedFilter = scanFilterName.trim().toLowerCase();
+  const filteredDevices = normalizedFilter
+    ? devices.filter((device) => (device.name || "").toLowerCase().includes(normalizedFilter))
+    : devices;
 
   useEffect(() => {
     setScanFilterName(status.scanFilterName || "");
@@ -171,7 +175,7 @@ export function BleClientControlPanel({ ws, status, devices }: BleClientControlP
           <div className="flex items-center justify-between">
             <span className="text-sm font-medium">Discovered Peripherals</span>
             <div className="flex items-center gap-2">
-              <Badge variant="outline">{devices.length}</Badge>
+              <Badge variant="outline">{filteredDevices.length}{normalizedFilter ? `/${devices.length}` : ""}</Badge>
               <Button
                 type="button"
                 variant="ghost"
@@ -185,14 +189,16 @@ export function BleClientControlPanel({ ws, status, devices }: BleClientControlP
             </div>
           </div>
 
-          {devices.length === 0 ? (
+          {filteredDevices.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No scan results yet. Start a scan to populate the list.
+              {normalizedFilter
+                ? "No devices match the current filter."
+                : "No scan results yet. Start a scan to populate the list."}
             </p>
           ) : (
             <ScrollArea className={`${expandedScanList ? "h-[34rem]" : "h-72"} pr-2`}>
               <div className="space-y-2">
-                {devices.map((device) => (
+                {filteredDevices.map((device) => (
                   <div key={device.address} className="rounded-md border p-3 space-y-2">
                     <div className="flex flex-col gap-2">
                       <div className="min-w-0">

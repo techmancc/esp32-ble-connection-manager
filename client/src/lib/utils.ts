@@ -22,10 +22,13 @@ export async function discoverEsp32(): Promise<string> {
   }
 
   // Get fallback URLs
-  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://192.168.11.109";
+  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://127.0.0.1:8787";
 
   // Auto-discovery: Try common ESP32 IP patterns
   const candidateIPs = [
+    // Local bridge (USB)
+    "127.0.0.1:8787",
+    "localhost:8787",
     // Known ESP32 IP (current session)
     "192.168.11.109",
     // Access Point mode

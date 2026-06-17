@@ -11,10 +11,27 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { BleClientControlPanel } from "@/components/BleClientControlPanel";
 import { BleServicesPanel } from "@/components/BleServicesPanel";
 import { useToast } from "@/hooks/use-toast";
-import { Cpu, Send, X, Loader2 } from "lucide-react";
+import { Cpu, Send, X, Loader2, RefreshCw, Usb } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { discoverEsp32, getWebSocketUrl } from "@/lib/utils";
 import type { BleScanDevice, BleServiceSummary, DashboardState, UpdateParameters, ParameterHistory, ParameterPreset } from "@shared/schema";
+
+type BridgeStatus = {
+  serialConnected: boolean;
+  selectedPort: string | null;
+  autoSelectEnabled: boolean;
+  lastError: string;
+  baudRate: number;
+  pollIntervalMs: number;
+};
+
+type BridgePort = {
+  path: string;
+  manufacturer: string;
+  friendlyName: string;
+  selected: boolean;
+  suggested: boolean;
+};
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -56,7 +73,13 @@ export default function Dashboard() {
   const [servicesInProgress, setServicesInProgress] = useState(false);
   const [servicesError, setServicesError] = useState<string | null>(null);
   const [negotiatedMtu, setNegotiatedMtu] = useState<number | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
+  const [bridgePorts, setBridgePorts] = useState<BridgePort[]>([]);
+  const [selectedBridgePort, setSelectedBridgePort] = useState("");
+  const [isSwitchingPort, setIsSwitchingPort] = useState(false);
+  const [startupWaitSeconds, setStartupWaitSeconds] = useState(0);
   const previousNextRef = useRef<typeof state.parameters.next>(null);
+  const wasConnectedRef = useRef(false);
 
   const { data: presets = [] } = useQuery<ParameterPreset[]>({
     queryKey: ["presets"],
@@ -96,10 +119,81 @@ export default function Dashboard() {
     }
   }, [state.parameters.next, toast]);
 
+  const loadBridgeMeta = useCallback(async () => {
+    try {
+      const baseUrl = await discoverEsp32();
+
+      const [statusResponse, portsResponse] = await Promise.all([
+        fetch(`${baseUrl}/api/bridge/status`),
+        fetch(`${baseUrl}/api/bridge/ports`),
+      ]);
+
+      if (statusResponse.ok) {
+        const statusData = (await statusResponse.json()) as BridgeStatus;
+        setBridgeStatus(statusData);
+        setSelectedBridgePort(statusData.selectedPort || "");
+      }
+
+      if (portsResponse.ok) {
+        const portsData = (await portsResponse.json()) as { ports: BridgePort[] };
+        setBridgePorts(Array.isArray(portsData.ports) ? portsData.ports : []);
+      }
+    } catch (error) {
+      console.error("Failed to load USB bridge metadata", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadBridgeMeta();
+    const intervalId = setInterval(loadBridgeMeta, 3000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [loadBridgeMeta]);
+
+  const handlePortModeSwitch = useCallback(async (autoSelect: boolean) => {
+    try {
+      setIsSwitchingPort(true);
+      const baseUrl = await discoverEsp32();
+
+      const payload = autoSelect
+        ? { autoSelect: true }
+        : { autoSelect: false, path: selectedBridgePort };
+
+      const response = await fetch(`${baseUrl}/api/bridge/select-port`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || "Failed to switch bridge port mode");
+      }
+
+      await loadBridgeMeta();
+      toast({
+        title: autoSelect ? "Auto Port Selection Enabled" : "Port Selected",
+        description: autoSelect
+          ? "Bridge will automatically choose an ESP32 serial port."
+          : `Bridge switched to ${selectedBridgePort}.`,
+      });
+    } catch (error) {
+      toast({
+        title: "Port Switch Failed",
+        description: error instanceof Error ? error.message : "Could not update bridge port mode.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSwitchingPort(false);
+    }
+  }, [loadBridgeMeta, selectedBridgePort, toast]);
+
   useEffect(() => {
     const connectWebSocket = () => {
       // Use direct WebSocket URL for testing
-      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://192.168.11.109:81';
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8787/ws';
       console.log('Attempting WebSocket connection to:', wsUrl);
       const socket = new WebSocket(wsUrl);
 
@@ -118,6 +212,7 @@ export default function Dashboard() {
         try {
           const data = JSON.parse(event.data);
           if (data.type === "state_update") {
+            const nextConnected = Boolean(data.state?.status?.isConnected);
             setState({
               ...data.state,
               status: {
@@ -125,6 +220,15 @@ export default function Dashboard() {
                 browserConnected: true,
               },
             });
+
+            // Kick off GATT discovery exactly when BLE link transitions to connected.
+            if (nextConnected && !wasConnectedRef.current && socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "ble_command", command: "discover_services" }));
+            }
+
+            wasConnectedRef.current = nextConnected;
+          } else if (data.type === "bridge_status") {
+            setBridgeStatus(data.status as BridgeStatus);
           } else if (data.type === "ble_scan_results") {
             setDiscoveredDevices(Array.isArray(data.devices) ? data.devices : []);
           } else if (data.type === "ble_services_update") {
@@ -211,6 +315,7 @@ export default function Dashboard() {
 
       socket.onclose = () => {
         console.log("WebSocket disconnected, attempting to reconnect...");
+        wasConnectedRef.current = false;
         setState((prev) => ({
           ...prev,
           status: {
@@ -352,6 +457,34 @@ export default function Dashboard() {
   }, [nextValues, ws, toast]);
 
   const hasNextValues = Object.values(nextValues).some((v) => v !== "");
+  const isBridgeMetaLoading = bridgeStatus === null;
+  const showBridgeWaitBanner = isBridgeMetaLoading || !state.status.browserConnected || !bridgeStatus?.serialConnected;
+
+  const waitBannerTitle = isBridgeMetaLoading
+    ? "Dashboard is initializing"
+    : !state.status.browserConnected
+      ? "Connecting to local bridge"
+      : "Waiting for ESP32 serial link";
+
+  const waitBannerMessage = isBridgeMetaLoading
+    ? "Checking bridge health and loading startup metadata. Controls will unlock when initialization finishes."
+    : !state.status.browserConnected
+      ? "The browser is waiting for a WebSocket session with the local USB bridge. This can take a few seconds after launch."
+      : "USB bridge is online but serial is not connected yet. Ensure ESP32 is attached and selected, then controls will become fully usable.";
+
+  useEffect(() => {
+    if (!showBridgeWaitBanner) {
+      setStartupWaitSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const timerId = setInterval(() => {
+      setStartupWaitSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => clearInterval(timerId);
+  }, [showBridgeWaitBanner]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -380,6 +513,84 @@ export default function Dashboard() {
       </header>
 
       <main className="container mx-auto px-4 sm:px-6 lg:px-8 max-w-[96rem] py-8">
+        {showBridgeWaitBanner ? (
+          <section
+            className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-900"
+            data-testid="startup-wait-banner"
+          >
+            <div className="flex items-start gap-3">
+              <Loader2 className="mt-0.5 h-4 w-4 animate-spin" />
+              <div className="space-y-1">
+                <h2 className="text-sm font-semibold">{waitBannerTitle}</h2>
+                <p className="text-xs leading-relaxed">{waitBannerMessage}</p>
+                <p className="text-xs font-medium">Startup wait: {startupWaitSeconds}s</p>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="mb-6 rounded-lg border bg-muted/20 p-4" data-testid="usb-bridge-banner">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Usb className="h-4 w-4 text-primary" />
+                <h2 className="text-sm font-semibold">USB Bridge Status</h2>
+                <span
+                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${bridgeStatus?.serialConnected ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}
+                >
+                  {bridgeStatus?.serialConnected ? "Connected" : "Disconnected"}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Port: {bridgeStatus?.selectedPort || "(none)"} | Mode: {bridgeStatus?.autoSelectEnabled ? "Auto Select" : "Manual"} | Baud: {bridgeStatus?.baudRate || 115200}
+              </p>
+              {bridgeStatus?.lastError ? (
+                <p className="text-xs text-red-600">Last error: {bridgeStatus.lastError}</p>
+              ) : null}
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                className="h-9 min-w-[220px] rounded-md border bg-background px-2 text-sm"
+                value={selectedBridgePort}
+                onChange={(e) => setSelectedBridgePort(e.target.value)}
+                disabled={Boolean(bridgeStatus?.autoSelectEnabled) || isSwitchingPort}
+                data-testid="select-usb-bridge-port"
+              >
+                <option value="">Select COM Port</option>
+                {bridgePorts.map((port) => (
+                  <option key={port.path} value={port.path}>
+                    {port.path} - {port.manufacturer}{port.suggested ? " (suggested)" : ""}
+                  </option>
+                ))}
+              </select>
+
+              <Button
+                variant="outline"
+                onClick={() => handlePortModeSwitch(true)}
+                disabled={isSwitchingPort || bridgeStatus?.autoSelectEnabled === true}
+                data-testid="button-bridge-auto-select"
+              >
+                Auto Select
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => handlePortModeSwitch(false)}
+                disabled={isSwitchingPort || !selectedBridgePort}
+                data-testid="button-bridge-manual-select"
+              >
+                Use Selected Port
+              </Button>
+
+              <Button variant="ghost" onClick={loadBridgeMeta} disabled={isSwitchingPort} data-testid="button-bridge-refresh">
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh
+              </Button>
+            </div>
+          </div>
+        </section>
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           <div className="lg:col-span-8 space-y-8">
             <section>
