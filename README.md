@@ -162,4 +162,3 @@ Or run VS Code task: `nRF52: Build FW Artifacts (Manual Flash)`.
 
 - Run dashboard commands from workspace root, not from `client/`.
 - There is no separate `client/package.json` in this workspace.
-- This workspace also contains a nested copy under `esp32-ble-connection-manager/`; root-level docs are the canonical set.
