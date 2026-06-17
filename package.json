@@ -5,6 +5,10 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
+    "dev:usb-bridge": "node scripts/free-port-and-run-usb-bridge.mjs",
+    "dev:usb-dashboard": "cross-env VITE_API_BASE_URL=http://127.0.0.1:8787 VITE_WS_URL=ws://127.0.0.1:8787/ws concurrently -k \"npm:dev:usb-bridge\" \"node scripts/wait-for-bridge-and-run-vite.mjs\"",
+    "clean:workspace": "node scripts/clean-workspace.mjs",
+    "clean:workspace:aggressive": "node scripts/clean-workspace.mjs --aggressive",
     "dev:host": "vite --host",
     "dev:host:clean": "node scripts/free-port-and-run-vite.mjs",
     "dev:server": "cross-env NODE_ENV=development tsx server/index.ts",
