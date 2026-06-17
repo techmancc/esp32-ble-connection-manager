@@ -1,5 +1,7 @@
 # 🚀 ESP32 WiFi Network Architecture Update
 
+Canonical setup and run commands are maintained in `README.md`. Use that file for current operational steps; this document is a design/change summary.
+
 ## 🎯 Summary
 
 Successfully upgraded the ESP32 BLE Connection Parameter System from **Access Point only** mode to **dual-mode network connectivity** supporting both Access Point mode and home WiFi connection.

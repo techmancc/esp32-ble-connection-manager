@@ -1,5 +1,7 @@
 # ESP32 BLE Client Architecture
 
+Canonical setup and run commands are maintained in `README.md`. This file focuses on architecture decisions and client-mode behavior.
+
 ## Overview
 This branch (`esp32-ble-client-manager`) implements the **inverse architecture** where the ESP32 acts as a **BLE Central/Client** device that scans for and connects to BLE peripherals, then applies connection parameters to those connected devices.
 

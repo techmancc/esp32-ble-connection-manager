@@ -1,5 +1,7 @@
 # 🚀 ESP32 Access Point Mode Setup Guide
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then use this guide for AP-mode specifics.
+
 ## ✅ **PROBLEM SOLVED!**
 Your ESP32 now runs in **Access Point (AP) mode**, eliminating all WiFi connection issues! The ESP32 creates its own WiFi network that you connect to directly.
 

@@ -1,5 +1,7 @@
 # ESP32 Client Integration Guide
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then use this document for integration behavior and API expectations.
+
 ## Overview
 Your ESP32 server is now fully configured to work with the React client dashboard. The ESP32 provides the same REST API and WebSocket interface as the original Node.js server, allowing the sophisticated React client to control BLE connection parameters.
 

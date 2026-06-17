@@ -1,6 +1,8 @@
 
 Running the Config Manager (Client form)
 
+Canonical setup and run commands are maintained in `README.md` (workspace root). This file is now a session log/reference.
+
 Use the root folder, not the client folder.
 
 Your client app is now running at:

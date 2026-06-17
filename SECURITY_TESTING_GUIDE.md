@@ -1,5 +1,7 @@
 # 🔐 ESP32 BLE Security Testing Protocol
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then execute this security test protocol.
+
 This script provides comprehensive testing procedures for the ESP32 BLE Connection Parameter System with Security features.
 
 ## 🎯 **Testing Overview**

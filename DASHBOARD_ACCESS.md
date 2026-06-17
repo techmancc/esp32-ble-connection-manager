@@ -1,6 +1,8 @@
 🌐 Dashboard Access Guide
 ========================
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then use this guide for access-mode details.
+
 Great! You can access the ESP32 at 192.168.4.1. Here are your options:
 
 ## Option 1: Use ESP32 Built-in Dashboard ✅ (WORKING)

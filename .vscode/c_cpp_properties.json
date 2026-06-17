@@ -496,6 +496,8 @@
                 "ARDUINO_EVENT_RUNNING_CORE=1",
                 "CORE_DEBUG_LEVEL=0",
                 "CONFIG_ARDUHAL_ESP_LOG",
+                "ARDUINO_USB_MODE=1",
+                "ARDUINO_USB_CDC_ON_BOOT=1",
                 "CONFIG_BT_NIMBLE_SM_BONDING=1",
                 "CONFIG_BT_NIMBLE_SM_SC=1",
                 "CONFIG_BT_NIMBLE_DEBUG=1",

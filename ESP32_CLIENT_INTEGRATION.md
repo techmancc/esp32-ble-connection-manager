@@ -1,5 +1,7 @@
 # ESP32 Client Integration Guide
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then use this document for API and architecture compatibility details.
+
 ## Overview
 
 The ESP32 server has been updated to provide the same API interface that the React client expects. This allows you to use the beautiful web client interface to control your ESP32's BLE connection parameters in real-time.

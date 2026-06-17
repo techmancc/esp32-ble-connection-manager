@@ -36,6 +36,24 @@
         "panel": "new"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "nRF52: Build FW Artifacts (Manual Flash)",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/build_nrf52_fw_manual.ps1"
+      ],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
     }
   ]
 }

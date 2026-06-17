@@ -23,7 +23,7 @@
         const params = new URLSearchParams(window.location.search);
         const wsFromQuery = params.get('ws');
         const wsFromStorage = localStorage.getItem('esp32_ws_url');
-        const defaultWsUrl = 'ws://192.168.11.109:81';
+        const defaultWsUrl = 'ws://192.168.4.1:81';  // ESP32 AP mode default IP
         wsUrlInput.value = wsFromQuery || wsFromStorage || defaultWsUrl;
         
         function log(message) {
