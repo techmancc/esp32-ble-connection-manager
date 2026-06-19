@@ -34,6 +34,7 @@ export default defineConfig({
   server: {
     host: true, // Allow access from any host
     port: 5173, // Use Vite's default port
+    strictPort: true, // Fail instead of auto-switching ports
     fs: {
       strict: true,
       deny: ["**/.*"],

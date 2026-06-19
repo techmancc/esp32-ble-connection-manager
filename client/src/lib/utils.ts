@@ -22,18 +22,24 @@ export async function discoverEsp32(): Promise<string> {
   }
 
   // Get fallback URLs
-  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://10.0.0.67";
+  const fallbackUrl = import.meta.env.VITE_FALLBACK_API_URL || "http://127.0.0.1:8787";
 
   // Auto-discovery: Try common ESP32 IP patterns
   const candidateIPs = [
+    // Local bridge (USB)
+    "127.0.0.1:8787",
+    "localhost:8787",
     // Known ESP32 IP (current session)
-    "10.0.0.67",
+    "192.168.11.109",
     // Access Point mode
     "192.168.4.1",
     // Common home router ranges for DHCP
+    "192.168.11.100", "192.168.11.101", "192.168.11.102", "192.168.11.103", "192.168.11.104",
+    "192.168.11.105", "192.168.11.106", "192.168.11.107", "192.168.11.108", "192.168.11.110",
     "192.168.1.100", "192.168.1.101", "192.168.1.102", "192.168.1.103", "192.168.1.104",
     "192.168.0.100", "192.168.0.101", "192.168.0.102", "192.168.0.103", "192.168.0.104",
     "10.0.0.100", "10.0.0.101", "10.0.0.102", "10.0.0.103", "10.0.0.104",
+    "10.0.0.67",
   ];
 
   console.log("🔍 Discovering ESP32...");
@@ -59,7 +65,7 @@ export async function discoverEsp32(): Promise<string> {
       if (response.ok) {
         const data = await response.json();
         // Verify this is actually our ESP32 by checking response structure
-        if (data && (data.stagedParams || data.appliedParams)) {
+        if (data && (data.state || data.status || data.parameters || data.bleStatus)) {
           console.log(`✅ Found ESP32 at ${testUrl}`);
           discoveredEsp32Url = testUrl;
           return testUrl;

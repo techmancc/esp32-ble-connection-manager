@@ -1,5 +1,7 @@
 🚀 ESP32 BLE Connection Parameter System - Client Setup
 
+Canonical setup and run commands are maintained in `README.md` (workspace root). Use that file first.
+
 UPDATED: Now supports both Access Point mode AND home WiFi connection!
 
 === QUICK START (Home WiFi Mode - Recommended) ===
@@ -13,9 +15,9 @@ UPDATED: Now supports both Access Point mode AND home WiFi connection!
    - Both ESP32 and your PC will be on the same network!
 
 2. START DEVELOPMENT SERVER:
-   cd client
    npm install
-   npm run dev -- --host
+   npm run dev
+   # Optional LAN access: npm run dev:host
 
 3. OPEN DASHBOARD:
    http://localhost:5173
@@ -35,8 +37,8 @@ If you prefer the old method or home WiFi doesn't work:
    .\test_esp32_connectivity.ps1
 
 3. START CLIENT:
-   cd client
-   npm run dev -- --host
+   npm run dev
+   # Optional LAN access: npm run dev:host
 
 4. ACCESS DASHBOARD:
    http://192.168.4.1/ (ESP32's web interface with React app links)

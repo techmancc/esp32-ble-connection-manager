@@ -14,6 +14,33 @@ Write-Host "🚀 ESP32 Home WiFi Setup" -ForegroundColor Green
 Write-Host "========================" -ForegroundColor Green
 Write-Host ""
 
+function Test-Esp32Endpoint {
+    param(
+        [string]$BaseUrl,
+        [int]$TimeoutSec = 2
+    )
+
+    try {
+        $state = Invoke-RestMethod -Uri "$BaseUrl/api/state" -TimeoutSec $TimeoutSec -ErrorAction Stop
+        return ($null -ne $state -and $null -ne $state.status -and $null -ne $state.parameters)
+    } catch {
+        return $false
+    }
+}
+
+function Get-Esp32WifiDiagnostics {
+    param(
+        [string]$BaseUrl,
+        [int]$TimeoutSec = 2
+    )
+
+    try {
+        return Invoke-RestMethod -Uri "$BaseUrl/api/wifi" -TimeoutSec $TimeoutSec -ErrorAction Stop
+    } catch {
+        return $null
+    }
+}
+
 # Check if ESP32 is accessible
 $esp32Found = $false
 $esp32Url = ""
@@ -22,8 +49,7 @@ Write-Host "🔍 Searching for ESP32..." -ForegroundColor Yellow
 
 # First, check if ESP32 is running in Access Point mode
 try {
-    $response = Invoke-RestMethod -Uri "http://192.168.4.1/api/state" -TimeoutSec 3 -ErrorAction SilentlyContinue
-    if ($response) {
+    if (Test-Esp32Endpoint -BaseUrl "http://192.168.4.1" -TimeoutSec 3) {
         Write-Host "✅ Found ESP32 in Access Point mode at http://192.168.4.1" -ForegroundColor Green
         $esp32Url = "http://192.168.4.1"
         $esp32Found = $true
@@ -51,16 +77,11 @@ if (-not $esp32Found) {
 
     foreach ($ip in $candidateIPs) {
         Write-Host "  Testing $ip..." -ForegroundColor Gray
-        try {
-            $response = Invoke-RestMethod -Uri "http://$ip/api/state" -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($response -and ($response.stagedParams -or $response.appliedParams)) {
-                Write-Host "✅ Found ESP32 at http://$ip" -ForegroundColor Green
-                $esp32Url = "http://$ip"
-                $esp32Found = $true
-                break
-            }
-        } catch {
-            # Continue searching
+        if (Test-Esp32Endpoint -BaseUrl "http://$ip" -TimeoutSec 2) {
+            Write-Host "✅ Found ESP32 at http://$ip" -ForegroundColor Green
+            $esp32Url = "http://$ip"
+            $esp32Found = $true
+            break
         }
     }
 }
@@ -139,16 +160,22 @@ try {
 
             foreach ($ip in $candidateIPs) {
                 try {
-                    $testResponse = Invoke-RestMethod -Uri "http://$ip/api/state" -TimeoutSec 1 -ErrorAction SilentlyContinue
-                    if ($testResponse -and ($testResponse.stagedParams -or $testResponse.appliedParams)) {
+                    if (Test-Esp32Endpoint -BaseUrl "http://$ip" -TimeoutSec 1) {
                         Write-Host "🎉 ESP32 successfully connected to home WiFi!" -ForegroundColor Green
                         Write-Host "📡 New ESP32 IP Address: $ip" -ForegroundColor Green
-                        Write-Host ""
-                        Write-Host "✅ Configuration Complete!" -ForegroundColor Green
+
+                            # Auto-update client/.env.local so React dev server uses correct IP
+                            $envLocalPath = Join-Path $PSScriptRoot "client\.env.local"
+                            $envContent = "VITE_API_BASE_URL=http://$ip`nVITE_WS_URL=ws://${ip}:81`n"
+                            Set-Content -Path $envLocalPath -Value $envContent -Encoding UTF8
+                            Write-Host "✅ Updated client/.env.local with new ESP32 IP" -ForegroundColor Green
+
+                            Write-Host ""
+                            Write-Host "✅ Configuration Complete!" -ForegroundColor Green
                         Write-Host ""
                         Write-Host "🚀 Next Steps:" -ForegroundColor Cyan
                         Write-Host "  1. Start the React development server:" -ForegroundColor White
-                        Write-Host "     cd client && npm run dev -- --host" -ForegroundColor Gray
+                            Write-Host "     npm run dev -- --host" -ForegroundColor Gray
                         Write-Host "  2. Open your browser to:" -ForegroundColor White
                         Write-Host "     http://localhost:5173" -ForegroundColor Gray
                         Write-Host "  3. Both your PC and ESP32 are now on the same network!" -ForegroundColor White
@@ -175,6 +202,26 @@ try {
             Write-Host "⚠️  ESP32 connection status unknown" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "The WiFi configuration was sent, but ESP32's new IP address couldn't be determined." -ForegroundColor Yellow
+            $fallbackDiagnostics = Get-Esp32WifiDiagnostics -BaseUrl "http://192.168.4.1" -TimeoutSec 2
+            if ($fallbackDiagnostics) {
+                Write-Host ""
+                Write-Host "ESP32 fallback diagnostics:" -ForegroundColor Cyan
+                if ($fallbackDiagnostics.stored.ssid) {
+                    Write-Host "  Stored SSID: $($fallbackDiagnostics.stored.ssid)" -ForegroundColor White
+                }
+                if ($fallbackDiagnostics.stored.lastError) {
+                    Write-Host "  Last Error: $($fallbackDiagnostics.stored.lastError)" -ForegroundColor Yellow
+                }
+                if ($fallbackDiagnostics.stored.lastStatusText) {
+                    Write-Host "  Status Text: $($fallbackDiagnostics.stored.lastStatusText)" -ForegroundColor Yellow
+                }
+                if ($fallbackDiagnostics.stored.lastScanResult) {
+                    Write-Host "  Scan Result: $($fallbackDiagnostics.stored.lastScanResult)" -ForegroundColor Yellow
+                }
+                if ($fallbackDiagnostics.mode) {
+                    Write-Host "  Current Mode: $($fallbackDiagnostics.mode)" -ForegroundColor White
+                }
+            }
             Write-Host ""
             Write-Host "Please check:" -ForegroundColor Cyan
             Write-Host "  1. ESP32 Serial Monitor for connection status" -ForegroundColor White

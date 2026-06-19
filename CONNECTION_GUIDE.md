@@ -1,6 +1,8 @@
 🚀 ESP32 Dashboard Connection Guide
 =====================================
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then return here for AP-mode specific connection flow.
+
 ✅ GOOD NEWS: Everything is working correctly!
 
 Your ESP32 is running and ready. Here's how to connect:

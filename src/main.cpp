@@ -7,9 +7,15 @@
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
+#include <esp_mac.h>
+#include <vector>
 
 // --- Configuration ---
-// ESP32 now runs in Access Point mode - no WiFi credentials needed!
+#ifndef BLE_USB_ONLY_MODE
+#define BLE_USB_ONLY_MODE 1
+#endif
+
+// BLE_USB_ONLY_MODE=1 disables WiFi/WebServer/WebSocket and uses USB Serial commands.
 
 // BLE Service / Characteristic UUIDs
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -70,9 +76,12 @@ struct SecurityStatus {
   int pairedDeviceCount;
 };
 
-struct WiFiCredentials {
-  String ssid;
-  String pass;
+struct DiscoveredBleDevice {
+  String address;
+  String name;
+  int rssi;
+  bool connectable;
+  unsigned long lastSeenMs;
 };
 
 // Globals
@@ -84,12 +93,30 @@ ConnectionParams nextParams = {0, 0, 0, 0}; // Parameters to be applied next
 bool hasNextParams = false;
 bool hasPreviousParams = false;
 
-NimBLEServer* pServer = nullptr;
-NimBLEService* pService = nullptr;
-NimBLECharacteristic* pMinCharacteristic = nullptr;
-NimBLECharacteristic* pMaxCharacteristic = nullptr;
-NimBLECharacteristic* pTimeoutCharacteristic = nullptr;
-NimBLECharacteristic* pLatencyCharacteristic = nullptr;
+// BLE Client globals (changed from Server)
+NimBLEClient* pClient = nullptr;
+NimBLEScan* pScan = nullptr;
+bool doConnect = false;
+bool isConnected = false;
+bool doScan = false;
+String scanNameFilter = "";
+bool scanFilterEnabled = false;
+DiscoveredBleDevice discoveredDevices[25];
+int discoveredDeviceCount = 0;
+String pendingConnectAddress = "";
+String discoveredServicesJson = "[]";
+bool servicesDiscoveryInProgress = false;
+String servicesDiscoveryError = "";
+uint16_t negotiatedMtu = 0;
+bool servicesDiscoveryPending = false;
+unsigned long servicesDiscoveryNextAttemptMs = 0;
+int servicesDiscoveryRetryCount = 0;
+unsigned long lastScanRestartMs = 0;
+
+// Connected peripheral info
+String connectedDeviceAddress = "";
+String connectedDeviceName = "None";
+uint16_t currentConnHandle = 0;
 
 WebServer webServer(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
@@ -108,10 +135,9 @@ ParameterPreset presets[] = {
 };
 int presetCount = 4;
 
-bool deviceConnected = false;
-uint16_t currentConnHandle = 0xffff;  // invalid
+// Connection status (removed deviceConnected, using isConnected from client globals)
 
-// Security and Pairing globals
+// Security and Pairing globals  
 SecurityStatus securityStatus;
 PairedDevice pairedDevices[10]; // Maximum 10 paired devices
 int pairedDeviceCount = 0;
@@ -119,6 +145,7 @@ NimBLEAddress currentConnectedAddress;
 bool isDeviceAuthenticated = false;
 
 unsigned long lastStatusMs = 0;
+String usbCommandBuffer = "";
 
 // Forward declarations
 void loadStoredParams();
@@ -130,7 +157,14 @@ void setupWiFi();
 void addToHistory(String source);
 void broadcastState();
 void broadcastHistory();
+void broadcastScanResults();
+void broadcastServices();
+void discoverConnectedServices(NimBLEClient* client);
+void clearDiscoveredServices();
 void serveClientFiles();
+void handleApiBleFilter();
+void handleApiBleScan();
+void logMacDiagnostics();
 
 // Security function declarations
 void setupBLESecurity();
@@ -141,6 +175,17 @@ void removePairedDevice(String address);
 bool isDevicePaired(NimBLEAddress address);
 void broadcastSecurityStatus();
 void initializeSecurityStatus();
+void clearDiscoveredDevices();
+void upsertDiscoveredDevice(NimBLEAdvertisedDevice* advertisedDevice);
+bool applyNextParametersInternal(const String& source, String* errorMsg = nullptr, bool* authWarning = nullptr);
+void handleUsbSerialInput();
+void processUsbCommand(const String& commandLine);
+void printUsbCommandHelp();
+void sendUsbState();
+void sendUsbHistory();
+void sendUsbScanResults();
+void sendUsbServices();
+void sendUsbSecurity();
 
 // Helpers: unit conversion
 static inline uint16_t ms_to_conn_interval_units(float ms) {
@@ -156,38 +201,291 @@ static inline float timeout_units_to_ms(uint16_t u) {
   return u * 10.0f;
 }
 
-static String sanitizeCredential(String value) {
-  value.trim();
-  if (value.length() > 0) {
-    if (value.charAt(0) == '"' || value.charAt(0) == '\'') {
-      value = value.substring(1);
-      value.trim();
-    }
+static const char* wifiStatusToString(wl_status_t status) {
+  switch (status) {
+    case WL_NO_SHIELD:
+      return "NO_SHIELD";
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID_AVAILABLE";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_COMPLETED";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
   }
-  if (value.length() > 0) {
-    char last = value.charAt(value.length() - 1);
-    if (last == '"' || last == '\'') {
-      value = value.substring(0, value.length() - 1);
-      value.trim();
-    }
-  }
-  return value;
 }
 
-static WiFiCredentials loadStoredWiFiCredentials() {
-  WiFiCredentials creds;
-  preferences.begin("ble_cfg", true);
-  creds.ssid = sanitizeCredential(preferences.getString("ssid", ""));
-  creds.pass = sanitizeCredential(preferences.getString("pass", ""));
-  preferences.end();
-  return creds;
+static const char* wifiAuthModeToString(wifi_auth_mode_t authMode) {
+  switch (authMode) {
+    case WIFI_AUTH_OPEN:
+      return "OPEN";
+    case WIFI_AUTH_WEP:
+      return "WEP";
+    case WIFI_AUTH_WPA_PSK:
+      return "WPA_PSK";
+    case WIFI_AUTH_WPA2_PSK:
+      return "WPA2_PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK:
+      return "WPA_WPA2_PSK";
+    case WIFI_AUTH_WPA2_ENTERPRISE:
+      return "WPA2_ENTERPRISE";
+    case WIFI_AUTH_WPA3_PSK:
+      return "WPA3_PSK";
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+      return "WPA2_WPA3_PSK";
+    case WIFI_AUTH_WAPI_PSK:
+      return "WAPI_PSK";
+    default:
+      return "UNKNOWN";
+  }
 }
 
-static void saveStoredWiFiCredentials(const String& ssid, const String& pass) {
-  preferences.begin("ble_cfg", false);
-  preferences.putString("ssid", sanitizeCredential(ssid));
-  preferences.putString("pass", sanitizeCredential(pass));
-  preferences.end();
+struct WiFiScanDiagnostic {
+  bool found;
+  int rssi;
+  int channel;
+  wifi_auth_mode_t authMode;
+  int matches;
+};
+
+static WiFiScanDiagnostic scanForTargetNetwork(const String& targetSsid) {
+  WiFiScanDiagnostic diagnostic = {false, -127, 0, WIFI_AUTH_OPEN, 0};
+
+  int networkCount = WiFi.scanNetworks();
+  for (int i = 0; i < networkCount; ++i) {
+    if (WiFi.SSID(i) == targetSsid) {
+      diagnostic.matches++;
+      if (!diagnostic.found || WiFi.RSSI(i) > diagnostic.rssi) {
+        diagnostic.found = true;
+        diagnostic.rssi = WiFi.RSSI(i);
+        diagnostic.channel = WiFi.channel(i);
+        diagnostic.authMode = WiFi.encryptionType(i);
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+  return diagnostic;
+}
+
+static bool matchesScanFilter(NimBLEAdvertisedDevice* advertisedDevice) {
+  if (!scanFilterEnabled || scanNameFilter.length() == 0) {
+    return true;
+  }
+
+  String advertisedName = advertisedDevice->getName().c_str();
+  if (advertisedName.length() == 0) {
+    return false;
+  }
+
+  String loweredName = advertisedName;
+  loweredName.toLowerCase();
+  String loweredFilter = scanNameFilter;
+  loweredFilter.toLowerCase();
+  return loweredName.indexOf(loweredFilter) >= 0;
+}
+
+static bool addressesMatch(const String& left, const String& right) {
+  String loweredLeft = left;
+  String loweredRight = right;
+  loweredLeft.toLowerCase();
+  loweredRight.toLowerCase();
+  return loweredLeft == loweredRight;
+}
+
+static bool isAdvertisementConnectable(NimBLEAdvertisedDevice* advertisedDevice) {
+  if (advertisedDevice == nullptr) {
+    return false;
+  }
+
+  // Rely on NimBLE's connectable classification.
+  return advertisedDevice->isConnectable();
+}
+
+void clearDiscoveredDevices() {
+  discoveredDeviceCount = 0;
+  broadcastScanResults();
+}
+
+void clearDiscoveredServices() {
+  discoveredServicesJson = "[]";
+  servicesDiscoveryInProgress = false;
+  servicesDiscoveryError = "";
+  negotiatedMtu = 0;
+  broadcastServices();
+}
+
+void broadcastServices() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
+  DynamicJsonDocument doc(16384);
+  doc["type"] = "ble_services_update";
+  doc["connected"] = isConnected;
+  doc["inProgress"] = servicesDiscoveryInProgress;
+  doc["mtu"] = negotiatedMtu;
+  if (servicesDiscoveryError.length() > 0) {
+    doc["error"] = servicesDiscoveryError;
+  } else {
+    doc["error"] = nullptr;
+  }
+  doc["services"] = serialized(discoveredServicesJson);
+
+  String message;
+  serializeJson(doc, message);
+  webSocket.broadcastTXT(message);
+}
+
+void discoverConnectedServices(NimBLEClient* client) {
+  if (client == nullptr || !client->isConnected()) {
+    servicesDiscoveryError = "No connected BLE client available for service discovery";
+    servicesDiscoveryInProgress = false;
+    broadcastServices();
+    return;
+  }
+
+  servicesDiscoveryInProgress = true;
+  servicesDiscoveryError = "";
+  negotiatedMtu = client->getMTU();
+  broadcastServices();
+
+  DynamicJsonDocument servicesDoc(16384);
+  JsonArray services = servicesDoc.to<JsonArray>();
+
+  std::vector<NimBLERemoteService*>* remoteServices = client->getServices(true);
+  if (remoteServices == nullptr) {
+    servicesDiscoveryError = "Service discovery returned no services";
+    discoveredServicesJson = "[]";
+    servicesDiscoveryInProgress = false;
+    broadcastServices();
+    return;
+  }
+
+  for (NimBLERemoteService* service : *remoteServices) {
+    if (service == nullptr) {
+      continue;
+    }
+
+    JsonObject serviceObj = services.createNestedObject();
+    serviceObj["uuid"] = service->getUUID().toString().c_str();
+
+    JsonArray characteristics = serviceObj.createNestedArray("characteristics");
+    std::vector<NimBLERemoteCharacteristic*>* remoteCharacteristics = service->getCharacteristics(true);
+
+    int characteristicCount = 0;
+    if (remoteCharacteristics != nullptr) {
+      for (NimBLERemoteCharacteristic* characteristic : *remoteCharacteristics) {
+        if (characteristic == nullptr) {
+          continue;
+        }
+
+        JsonObject characteristicObj = characteristics.createNestedObject();
+        characteristicObj["uuid"] = characteristic->getUUID().toString().c_str();
+        characteristicObj["canRead"] = characteristic->canRead();
+        characteristicObj["canWrite"] = characteristic->canWrite();
+        characteristicObj["canNotify"] = characteristic->canNotify();
+        characteristicObj["canIndicate"] = characteristic->canIndicate();
+        characteristicObj["canWriteNoResponse"] = characteristic->canWriteNoResponse();
+        characteristicCount++;
+      }
+    }
+
+    serviceObj["characteristicCount"] = characteristicCount;
+  }
+
+  if (servicesDoc.overflowed()) {
+    servicesDiscoveryError = "Service discovery data exceeded buffer size";
+    discoveredServicesJson = "[]";
+  } else {
+    serializeJson(servicesDoc, discoveredServicesJson);
+  }
+
+  negotiatedMtu = client->getMTU();
+  servicesDiscoveryInProgress = false;
+  broadcastServices();
+}
+
+void upsertDiscoveredDevice(NimBLEAdvertisedDevice* advertisedDevice) {
+  if (advertisedDevice == nullptr) {
+    return;
+  }
+
+  DiscoveredBleDevice device;
+  device.address = advertisedDevice->getAddress().toString().c_str();
+  device.name = advertisedDevice->getName().c_str();
+  if (device.name.length() == 0) {
+    device.name = "(unnamed)";
+  }
+  device.rssi = advertisedDevice->getRSSI();
+  device.connectable = isAdvertisementConnectable(advertisedDevice);
+  device.lastSeenMs = millis();
+
+  int existingIndex = -1;
+  for (int i = 0; i < discoveredDeviceCount; ++i) {
+    if (addressesMatch(discoveredDevices[i].address, device.address)) {
+      existingIndex = i;
+      break;
+    }
+  }
+
+  if (existingIndex >= 0) {
+    if (device.name == "(unnamed)" && discoveredDevices[existingIndex].name.length() > 0) {
+      device.name = discoveredDevices[existingIndex].name;
+    }
+
+    // Preserve connectable=true once observed for an address so later packets
+    // (for example scan responses) do not downgrade it to observer-only.
+    device.connectable = discoveredDevices[existingIndex].connectable || device.connectable;
+
+    for (int i = existingIndex; i > 0; --i) {
+      discoveredDevices[i] = discoveredDevices[i - 1];
+    }
+    discoveredDevices[0] = device;
+    return;
+  }
+
+  int insertLimit = min(discoveredDeviceCount, 24);
+  for (int i = insertLimit; i > 0; --i) {
+    discoveredDevices[i] = discoveredDevices[i - 1];
+  }
+  discoveredDevices[0] = device;
+
+  if (discoveredDeviceCount < 25) {
+    discoveredDeviceCount++;
+  }
+}
+
+void broadcastScanResults() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
+  DynamicJsonDocument doc(8192);
+  doc["type"] = "ble_scan_results";
+
+  JsonArray devices = doc.createNestedArray("devices");
+  for (int i = 0; i < discoveredDeviceCount; ++i) {
+    JsonObject device = devices.createNestedObject();
+    device["address"] = discoveredDevices[i].address;
+    device["name"] = discoveredDevices[i].name;
+    device["rssi"] = discoveredDevices[i].rssi;
+    device["connectable"] = discoveredDevices[i].connectable;
+    device["lastSeenMs"] = discoveredDevices[i].lastSeenMs;
+  }
+
+  String message;
+  serializeJson(doc, message);
+  webSocket.broadcastTXT(message);
 }
 
 // Security Callback Class
@@ -396,6 +694,10 @@ bool isDevicePaired(NimBLEAddress address) {
 }
 
 void broadcastSecurityStatus() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
   DynamicJsonDocument doc(2048);
 
   doc["type"] = "security_status";
@@ -435,6 +737,16 @@ void loadStoredParams() {
   storedParams.maxInterval = preferences.getFloat("maxMs", 480.0);
   storedParams.supervisionTimeout = preferences.getFloat("stMs", 5620.0);
   storedParams.slaveLatency = preferences.getInt("lat", 4);
+  
+  // Initialize defaults if this is first boot (no params set yet)
+  if (!preferences.isKey("minMs")) {
+    preferences.putFloat("minMs", storedParams.minInterval);
+    preferences.putFloat("maxMs", storedParams.maxInterval);
+    preferences.putFloat("stMs", storedParams.supervisionTimeout);
+    preferences.putInt("lat", storedParams.slaveLatency);
+    Serial.println("[INIT] First boot detected - initialized default BLE parameters");
+  }
+  
   preferences.end();
 
   // copy to lastRequested as initial
@@ -451,184 +763,188 @@ void saveStoredParams() {
 }
 
 // BLE server callbacks
-class ServerCallbacks : public NimBLEServerCallbacks {
+// BLE Client callbacks
+class ClientCallbacks : public NimBLEClientCallbacks {
 public:
-  void onConnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
-    deviceConnected = true;
-    currentConnHandle = desc->conn_handle;
-    currentConnectedAddress = NimBLEAddress(desc->peer_ota_addr);
-
-    Serial.printf("BLE Client connected (conn handle %u, address: %s)\n",
-                  currentConnHandle, currentConnectedAddress.toString().c_str());
-
-    // Check if device is paired when authentication is required
-    if (securityStatus.requireAuthentication) {
-      isDeviceAuthenticated = isDevicePaired(currentConnectedAddress);
-      if (!isDeviceAuthenticated) {
-        Serial.println("Unknown device - initiating pairing process");
-        securityStatus.isPairing = true;
-        securityStatus.pairingDeviceAddress = currentConnectedAddress.toString().c_str();
-        broadcastSecurityStatus();
-      } else {
-        Serial.println("Known paired device connected");
-        // Mark device as authenticated
-        for (int i = 0; i < pairedDeviceCount; i++) {
-          if (pairedDevices[i].address == currentConnectedAddress.toString().c_str()) {
-            pairedDevices[i].authenticated = true;
-            break;
-          }
-        }
-        isDeviceAuthenticated = true;
-      }
-    } else {
-      isDeviceAuthenticated = true; // Allow all devices when auth not required
-    }
-
-    // Apply connection parameters
-    Serial.printf("Requesting conn params: min=%.2f max=%.2f latency=%d timeout=%.0f\n",
-                  storedParams.minInterval, storedParams.maxInterval, storedParams.slaveLatency, storedParams.supervisionTimeout);
-    uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-    uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-    uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-    server->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
-
-    lastRequestedParams = storedParams;
-    broadcastState();
-    broadcastSecurityStatus();
-  }
-
-  void onDisconnect(NimBLEServer* server, ble_gap_conn_desc* desc) override {
-    (void)server;
-    (void)desc;
-    deviceConnected = false;
-    currentConnHandle = 0xffff;
+  void onConnect(NimBLEClient* pclient) override {
+    isConnected = true;
     isDeviceAuthenticated = false;
-    currentConnectedAddress = NimBLEAddress("");
+    currentConnHandle = pclient->getConnId();
+    connectedDeviceAddress = pclient->getPeerAddress().toString().c_str();
+    connectedDeviceName = "BLE Device";
 
-    // Clear authentication status for all devices
-    for (int i = 0; i < pairedDeviceCount; i++) {
-      pairedDevices[i].authenticated = false;
+    for (int i = 0; i < discoveredDeviceCount; ++i) {
+      if (addressesMatch(discoveredDevices[i].address, connectedDeviceAddress) &&
+          discoveredDevices[i].name.length() > 0) {
+        connectedDeviceName = discoveredDevices[i].name;
+        break;
+      }
     }
 
-    Serial.println("BLE Client disconnected");
-    securityStatus.isPairing = false;
-    securityStatus.currentPin = "";
+    negotiatedMtu = pclient->getMTU();
+    Serial.printf("Connected to BLE peripheral (conn handle %u, address: %s, mtu=%u)\n",
+                  currentConnHandle, connectedDeviceAddress.c_str(), negotiatedMtu);
+
+    // Do not force conn params immediately on connect.
+    // Some peripherals disconnect if first request is too aggressive before ATT/GATT settles.
+    Serial.println("Skipping immediate conn param update; keeping peripheral defaults for discovery");
     broadcastState();
     broadcastSecurityStatus();
+
+    // Defer GATT discovery to loop context to avoid running heavy ATT/GATT
+    // operations from within NimBLE callback context.
+    servicesDiscoveryPending = true;
+    servicesDiscoveryRetryCount = 0;
+    servicesDiscoveryNextAttemptMs = millis() + 300;
+    servicesDiscoveryError = "";
+    servicesDiscoveryInProgress = false;
+    discoveredServicesJson = "[]";
+    broadcastServices();
+
+    Serial.println("Queued GATT service discovery after connection stabilization");
+  }
+
+  void onDisconnect(NimBLEClient* pclient) override {
+    (void)pclient;
+    isConnected = false;
+    currentConnHandle = 0xffff;
+    connectedDeviceAddress = "";
+    connectedDeviceName = "None";
+
+    Serial.println("Disconnected from BLE peripheral");
+    servicesDiscoveryPending = false;
+    servicesDiscoveryRetryCount = 0;
+    servicesDiscoveryNextAttemptMs = 0;
+    clearDiscoveredServices();
+    broadcastState();
+    broadcastSecurityStatus();
+
+    // Start scanning again after disconnect
+    doScan = true;
   }
 };
 
-// Characteristic callbacks: write updates storedParams and save
-class ParamCharCallbacks : public NimBLECharacteristicCallbacks {
+// Advertised Device callbacks for scanning
+class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
 public:
-  void onWrite(NimBLECharacteristic* pCharacteristic) override {
-    // Check if authentication is required and device is authenticated
-    if (securityStatus.requireAuthentication && !isDeviceAuthenticated) {
-      Serial.println("Unauthorized write attempt - device not authenticated");
+  void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+    String advertisedAddress = advertisedDevice->getAddress().toString().c_str();
+    String advertisedName = advertisedDevice->getName().c_str();
+    bool isAdvertisedConnectable = isAdvertisementConnectable(advertisedDevice);
+    bool isPendingTarget = !isConnected && doConnect && pendingConnectAddress.length() > 0 &&
+                           addressesMatch(advertisedAddress, pendingConnectAddress);
+    bool hasAdvertisedName = advertisedName.length() > 0;
+    if (advertisedName.length() == 0) {
+      advertisedName = "(unnamed)";
+    }
+
+    if (!isPendingTarget && !matchesScanFilter(advertisedDevice)) {
+      if (hasAdvertisedName) {
+        Serial.printf("Ignoring BLE device '%s' because it does not match include filter '%s'\n",
+                      advertisedName.c_str(), scanNameFilter.c_str());
+      }
       return;
     }
 
-    std::string v = pCharacteristic->getValue();
-    const char* uuid = pCharacteristic->getUUID().toString().c_str();
-    if (v.size() != sizeof(uint16_t)) {
-      Serial.println("Invalid write size");
-      return;
+    upsertDiscoveredDevice(advertisedDevice);
+    broadcastScanResults();
+
+    if (scanFilterEnabled) {
+      Serial.printf("BLE device '%s' matched include filter '%s'\n",
+                    advertisedName.c_str(), scanNameFilter.c_str());
     }
-    if (v.size() >= 2) {
-      uint16_t val = (uint8_t)v[1];
-      val = (val << 8) | (uint8_t)v[0];
 
-      if (pCharacteristic == pMinCharacteristic) {
-        uint16_t units = ms_to_conn_interval_units(storedParams.minInterval);
-        storedParams.minInterval = conn_interval_units_to_ms(val);
-        Serial.printf("Characteristic write: minInterval = %.2f ms\n", storedParams.minInterval);
-      } else if (pCharacteristic == pMaxCharacteristic) {
-        uint16_t units = ms_to_conn_interval_units(storedParams.maxInterval);
-        storedParams.maxInterval = conn_interval_units_to_ms(val);
-        Serial.printf("Characteristic write: maxInterval = %.2f ms\n", storedParams.maxInterval);
-      } else if (pCharacteristic == pTimeoutCharacteristic) {
-        uint16_t units = ms_to_timeout_units(storedParams.supervisionTimeout);
-        storedParams.supervisionTimeout = timeout_units_to_ms(val);
-        Serial.printf("Characteristic write: supervisionTimeout = %.0f ms\n", storedParams.supervisionTimeout);
-      } else if (pCharacteristic == pLatencyCharacteristic) {
-        storedParams.slaveLatency = val;
-        Serial.printf("Characteristic write: slaveLatency = %d\n", storedParams.slaveLatency);
-      }
-      saveStoredParams();
-      addToHistory("BLE (Authenticated)");
+    if (!isConnected && doConnect && pendingConnectAddress.length() > 0 &&
+        addressesMatch(advertisedAddress, pendingConnectAddress)) {
+      pScan->stop();
 
-      // If a central is connected, immediately request the update
-      if (deviceConnected && pServer && currentConnHandle != 0xffff) {
-        Serial.println("Device connected: sending updateConnParams with newly saved params");
-        uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-        uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-        uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-        pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
-        lastRequestedParams = storedParams;
+      Serial.printf("Found requested device: %s (connectable=%s)\n",
+                    advertisedDevice->toString().c_str(),
+                    isAdvertisedConnectable ? "true" : "false");
+
+      if (!isAdvertisedConnectable) {
+        Serial.println("Matched packet is non-connectable (likely scan response); attempting direct address connection");
       }
 
-      broadcastState();
+      // Create client and connect
+      pClient = NimBLEDevice::createClient();
+      pClient->setClientCallbacks(new ClientCallbacks(), false);
+
+      NimBLEAddress targetAddress(advertisedAddress.c_str());
+      bool connectStarted = pClient->connect(targetAddress);
+
+      if (connectStarted) {
+        Serial.println("Connected to peripheral");
+        doConnect = false;
+        pendingConnectAddress = "";
+      } else {
+        Serial.println("Failed to connect to peripheral; keeping target pending for retry");
+        doScan = true; // Resume scanning
+      }
     }
   }
 };
 
-// Setup BLE peripheral service and characteristics
+// Setup BLE Client for connecting to peripherals
 void setupBLE() {
-  NimBLEDevice::init("BLE_Config_Server");
-  // allow for larger than 23 bytes of BLE message.
-  NimBLEDevice::setMTU(100);  // or desired value
+  uint8_t btMac[6] = {0};
+  String bleClientName = "ESP32_BLE_Client_Manager";
+  if (esp_read_mac(btMac, ESP_MAC_BT) == ESP_OK) {
+    char nameBuffer[48];
+    snprintf(nameBuffer, sizeof(nameBuffer), "ESP32_BLE_Client_%02X%02X", btMac[4], btMac[5]);
+    bleClientName = String(nameBuffer);
+  }
+
+  NimBLEDevice::init(bleClientName.c_str());
+  NimBLEDevice::setMTU(100);  // Allow larger BLE messages
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
-  // Setup BLE Security first
-  setupBLESecurity();
+  logMacDiagnostics();
 
-  pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
-
-  pService = pServer->createService(SERVICE_UUID);
-
-  // Create characteristics with appropriate security properties
-  uint32_t properties = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE;
-  if (securityStatus.requireAuthentication) {
-    properties |= NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::WRITE_ENC;
+  // Hard-disable GAP advertising for this client-only firmware.
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+  if (pAdvertising != nullptr && pAdvertising->isAdvertising()) {
+    pAdvertising->stop();
   }
 
-  pMinCharacteristic = pService->createCharacteristic(MIN_INTERVAL_UUID, properties);
-  pMaxCharacteristic = pService->createCharacteristic(MAX_INTERVAL_UUID, properties);
-  pTimeoutCharacteristic = pService->createCharacteristic(SUPERVISION_TO_UUID, properties);
-  pLatencyCharacteristic = pService->createCharacteristic(SLAVE_LATENCY_UUID, properties);
+  NimBLEAddress localAddress = NimBLEDevice::getAddress();
+  Serial.printf("BLE client identity: name='%s', address=%s\n",
+                bleClientName.c_str(), localAddress.toString().c_str());
+  Serial.println("BLE advertising explicitly disabled (client-only mode)");
 
-  ParamCharCallbacks* cb = new ParamCharCallbacks();
-  pMinCharacteristic->setCallbacks(cb);
-  pMaxCharacteristic->setCallbacks(cb);
-  pTimeoutCharacteristic->setCallbacks(cb);
-  pLatencyCharacteristic->setCallbacks(cb);
+  // Setup BLE Security
+  setupBLESecurity();
 
-  // Initialize characteristic values from stored params
-  uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-  uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-  uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-  uint16_t latency = storedParams.slaveLatency;
+  // Initialize BLE Scan
+  pScan = NimBLEDevice::getScan();
+  pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
+  pScan->setActiveScan(true); // Active scan uses more power but gets results faster
+  pScan->setInterval(100);    // Scan interval in 0.625ms units
+  pScan->setWindow(99);       // Scan window in 0.625ms units (must be <= interval)
 
-  pMinCharacteristic->setValue((const uint8_t*)&minUnits, sizeof(minUnits));
-  pMaxCharacteristic->setValue((const uint8_t*)&maxUnits, sizeof(maxUnits));
-  pTimeoutCharacteristic->setValue((const uint8_t*)&timeoutUnits, sizeof(timeoutUnits));
-  pLatencyCharacteristic->setValue((const uint8_t*)&latency, sizeof(latency));
+  // Start scanning for peripherals
+  doScan = true;
+  
+  Serial.println("BLE Client Manager Ready - Scanning for peripherals...");
+}
 
-  pService->start();
+void logMacDiagnostics() {
+  uint8_t baseMac[6] = {0};
+  uint8_t btMac[6] = {0};
 
-  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  // Add service UUID (will be added in advertising payload)
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  // Keep the advertisement payload small to avoid exceeding 31 bytes.
-  // Use a short device name and put optional data in the scan response.
-  NimBLEAdvertisementData advData;
-  advData.setName("BLE_CFG_Secure");  // Updated name to indicate security
-  pAdvertising->setAdvertisementData(advData);
-  pAdvertising->setScanResponseData(advData);
-  NimBLEDevice::startAdvertising();
+  if (esp_base_mac_addr_get(baseMac) == ESP_OK) {
+    Serial.printf("EFUSE base MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                  baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
+  } else {
+    Serial.println("EFUSE base MAC: <unavailable>");
+  }
 
-  Serial.println("BLE Config Server Ready and Advertising with Security");
+  if (esp_read_mac(btMac, ESP_MAC_BT) == ESP_OK) {
+    Serial.printf("ESP BT MAC    : %02x:%02x:%02x:%02x:%02x:%02x\n",
+                  btMac[0], btMac[1], btMac[2], btMac[3], btMac[4], btMac[5]);
+  } else {
+    Serial.println("ESP BT MAC    : <unavailable>");
+  }
 }
 
 void setupBLESecurity() {
@@ -638,20 +954,26 @@ void setupBLESecurity() {
   // Load paired devices
   loadPairedDevices();
 
-  // Configure security parameters
-  NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_MITM | BLE_SM_PAIR_AUTHREQ_SC);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO);
+  // Configure security parameters.
+  // Keep this permissive for compatibility with meters that do not support
+  // MITM/SC and may disconnect during strict pairing negotiation.
+  NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
   NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
 
   // Set security callbacks
   NimBLEDevice::setSecurityCallbacks(new SecurityCallbacks());
 
-  Serial.println("BLE Security configured: Bonding + MITM + Secure Connections");
+  Serial.println("BLE Security configured: Bonding (compatibility mode)");
 }
 
 // --- WebSocket Functions ---
 void broadcastState() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
   DynamicJsonDocument doc(2048);
 
   doc["type"] = "state_update";
@@ -693,13 +1015,20 @@ void broadcastState() {
 
   // Status
   JsonObject status = state.createNestedObject("status");
-  status["isAdvertising"] = !deviceConnected; // Advertising when not connected
-  status["isConnected"] = deviceConnected;
-  status["connectedDeviceName"] = deviceConnected ? "BLE Device" : nullptr;
+  status["isAdvertising"] = false; // Client mode - no advertising
+  status["isConnected"] = isConnected;
+  status["connectedDeviceName"] = isConnected ? connectedDeviceName.c_str() : nullptr;
   status["browserConnected"] = true; // Always true if we're broadcasting
   status["deviceAuthenticated"] = isDeviceAuthenticated;
   status["requiresAuthentication"] = securityStatus.requireAuthentication;
-  if (deviceConnected && !currentConnectedAddress.toString().empty()) {
+  status["scanFilterEnabled"] = scanFilterEnabled;
+  if (scanFilterEnabled) {
+    status["scanFilterName"] = scanNameFilter;
+  } else {
+    status["scanFilterName"] = nullptr;
+  }
+  status["isScanning"] = (pScan != nullptr && pScan->isScanning());
+  if (isConnected && !connectedDeviceAddress.isEmpty()) {
     status["connectedDeviceAddress"] = currentConnectedAddress.toString().c_str();
   } else {
     status["connectedDeviceAddress"] = nullptr;
@@ -711,6 +1040,10 @@ void broadcastState() {
 }
 
 void broadcastHistory() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
   DynamicJsonDocument doc(4096);
 
   doc["type"] = "history_update";
@@ -752,6 +1085,8 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       broadcastState();
       broadcastHistory();
       broadcastSecurityStatus();
+      broadcastScanResults();
+      broadcastServices();
       break;
     }
 
@@ -896,7 +1231,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           String responseStr;
           serializeJson(response, responseStr);
           webSocket.sendTXT(num, responseStr);
-        } else if (!deviceConnected) {
+        } else if (!isConnected) {
           DynamicJsonDocument response(256);
           response["type"] = "apply_parameters_error";
           response["error"] = "No BLE device connected";
@@ -917,7 +1252,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
           Serial.printf("Sending BLE updateConnParams: min=%u, max=%u, latency=%d, timeout=%u\n", 
                         minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
           
-          pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+          pClient->updateConnParams(minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
           
           // Send success response
           DynamicJsonDocument response(256);
@@ -945,6 +1280,123 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
         
         broadcastState();
       }
+      else if (doc["type"] == "ble_command") {
+        String command = doc["command"] | "";
+
+        DynamicJsonDocument response(384);
+        response["type"] = "ble_command_response";
+        response["command"] = command;
+
+        if (command == "set_scan_filter") {
+          String deviceName = doc["deviceName"] | "";
+          deviceName.trim();
+
+          scanNameFilter = deviceName;
+          scanFilterEnabled = scanNameFilter.length() > 0;
+
+          response["success"] = true;
+          response["scanFilterEnabled"] = scanFilterEnabled;
+          response["scanFilterName"] = scanNameFilter;
+
+          if ((bool)(doc["restartScan"] | true)) {
+            if (pScan != nullptr && pScan->isScanning()) {
+              pScan->stop();
+            }
+            clearDiscoveredDevices();
+            pendingConnectAddress = "";
+            doConnect = false;
+            doScan = true;
+          }
+
+          Serial.printf("BLE scan filter set to: '%s'\n", scanNameFilter.c_str());
+          broadcastState();
+        }
+        else if (command == "clear_scan_filter") {
+          scanNameFilter = "";
+          scanFilterEnabled = false;
+
+          response["success"] = true;
+          response["scanFilterEnabled"] = false;
+          response["scanFilterName"] = "";
+
+          Serial.println("BLE scan filter cleared");
+          broadcastState();
+        }
+        else if (command == "start_scan") {
+          if (pScan != nullptr && pScan->isScanning()) {
+            pScan->stop();
+          }
+          clearDiscoveredDevices();
+          pendingConnectAddress = "";
+          doConnect = false;
+          doScan = true;
+
+          response["success"] = true;
+          response["scanFilterEnabled"] = scanFilterEnabled;
+          response["scanFilterName"] = scanNameFilter;
+
+          Serial.println("BLE scan requested from WebSocket command");
+          broadcastState();
+        }
+        else if (command == "connect_device") {
+          String deviceAddress = doc["address"] | "";
+          deviceAddress.trim();
+
+          if (deviceAddress.length() == 0) {
+            response["success"] = false;
+            response["error"] = "Device address is required";
+          } else {
+            bool foundDevice = false;
+            bool deviceIsConnectable = false;
+            for (int i = 0; i < discoveredDeviceCount; ++i) {
+              if (addressesMatch(discoveredDevices[i].address, deviceAddress)) {
+                foundDevice = true;
+                deviceIsConnectable = discoveredDevices[i].connectable;
+                break;
+              }
+            }
+
+            if (!foundDevice) {
+              response["success"] = false;
+              response["error"] = "Device is no longer in scan results. Scan again and retry.";
+            } else {
+            if (!deviceIsConnectable) {
+              response["warning"] = "Selected device is marked observer; attempting connection anyway.";
+            }
+            pendingConnectAddress = deviceAddress;
+            doConnect = true;
+            if (pScan != nullptr && !pScan->isScanning()) {
+              doScan = true;
+            }
+
+            response["success"] = true;
+            response["address"] = pendingConnectAddress;
+            Serial.printf("BLE connection requested for %s\n", pendingConnectAddress.c_str());
+            broadcastState();
+            }
+          }
+        }
+        else if (command == "disconnect") {
+          if (isConnected && pClient != nullptr) {
+            pClient->disconnect();
+            pendingConnectAddress = "";
+            doConnect = false;
+            response["success"] = true;
+          } else {
+            response["success"] = false;
+            response["error"] = "No active BLE connection";
+          }
+          broadcastState();
+        }
+        else {
+          response["success"] = false;
+          response["error"] = "Unknown BLE command";
+        }
+
+        String responseStr;
+        serializeJson(response, responseStr);
+        webSocket.sendTXT(num, responseStr);
+      }
       break;
     }
 
@@ -954,6 +1406,10 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 void setupWebSocket() {
+  if (BLE_USB_ONLY_MODE) {
+    return;
+  }
+
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
   Serial.println("WebSocket server started on port 81");
@@ -990,14 +1446,67 @@ void handleApiState() {
 
   // Status
   JsonObject status = doc.createNestedObject("status");
-  status["isAdvertising"] = !deviceConnected;
-  status["isConnected"] = deviceConnected;
-  status["connectedDeviceName"] = deviceConnected ? "BLE Device" : nullptr;
+  status["isAdvertising"] = false; // Client mode
+  status["isConnected"] = isConnected;
+  status["connectedDeviceName"] = isConnected ? connectedDeviceName.c_str() : nullptr;
   status["browserConnected"] = true;
+  status["scanFilterEnabled"] = scanFilterEnabled;
+  if (scanFilterEnabled) {
+    status["scanFilterName"] = scanNameFilter;
+  } else {
+    status["scanFilterName"] = nullptr;
+  }
+  status["isScanning"] = (pScan != nullptr && pScan->isScanning());
 
   String response;
   serializeJson(doc, response);
   webServer.send(200, "application/json", response);
+}
+
+void handleApiBleFilter() {
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  if (webServer.hasArg("name")) {
+    scanNameFilter = webServer.arg("name");
+    scanNameFilter.trim();
+    scanFilterEnabled = scanNameFilter.length() > 0;
+  } else if (webServer.hasArg("clear")) {
+    scanNameFilter = "";
+    scanFilterEnabled = false;
+  }
+
+  DynamicJsonDocument doc(256);
+  doc["success"] = true;
+  doc["scanFilterEnabled"] = scanFilterEnabled;
+  doc["scanFilterName"] = scanFilterEnabled ? scanNameFilter : "";
+
+  String response;
+  serializeJson(doc, response);
+  webServer.send(200, "application/json", response);
+  broadcastState();
+}
+
+void handleApiBleScan() {
+  webServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  if (pScan != nullptr && pScan->isScanning()) {
+    pScan->stop();
+  }
+  clearDiscoveredDevices();
+  pendingConnectAddress = "";
+  doConnect = false;
+  doScan = true;
+
+  DynamicJsonDocument doc(256);
+  doc["success"] = true;
+  doc["message"] = "BLE scan started";
+  doc["scanFilterEnabled"] = scanFilterEnabled;
+  doc["scanFilterName"] = scanFilterEnabled ? scanNameFilter : "";
+
+  String response;
+  serializeJson(doc, response);
+  webServer.send(200, "application/json", response);
+  broadcastState();
 }
 
 void handleApiHistory() {
@@ -1071,6 +1580,7 @@ void handleApiWifiStatus() {
       doc["sta"]["mac"] = WiFi.macAddress();
     }
     doc["sta"]["status"] = WiFi.status();
+    doc["sta"]["statusText"] = wifiStatusToString((wl_status_t)WiFi.status());
   }
   
   if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
@@ -1082,11 +1592,13 @@ void handleApiWifiStatus() {
   }
   
   // Stored credentials info (without passwords)
-  WiFiCredentials creds = loadStoredWiFiCredentials();
-  String stored_ssid = creds.ssid;
   preferences.begin("ble_cfg", true);
+  String stored_ssid = preferences.getString("ssid", "");
   String last_ip = preferences.getString("last_ip", "");
   String last_error = preferences.getString("last_error", "");
+  String last_status_text = preferences.getString("last_status_text", "");
+  String last_scan_result = preferences.getString("last_scan_result", "");
+  int last_error_code = preferences.getInt("last_error_code", -1);
   unsigned long long last_connect = preferences.getULong64("last_connect", 0);
   preferences.end();
   
@@ -1096,6 +1608,9 @@ void handleApiWifiStatus() {
     doc["stored"]["lastSuccessfulIP"] = last_ip;
     doc["stored"]["lastConnectTime"] = last_connect;
     doc["stored"]["lastError"] = last_error;
+    doc["stored"]["lastStatusText"] = last_status_text;
+    doc["stored"]["lastScanResult"] = last_scan_result;
+    doc["stored"]["lastErrorCode"] = last_error_code;
   }
   
   doc["uptime"] = millis();
@@ -1185,85 +1700,448 @@ bool validateParameterCombination(const ConnectionParams& params, String& errorM
   return true;
 }
 
+bool applyNextParametersInternal(const String& source, String* errorMsg, bool* authWarning) {
+  if (authWarning != nullptr) {
+    *authWarning = false;
+  }
+
+  if (!hasNextParams) {
+    if (errorMsg != nullptr) {
+      *errorMsg = "No parameters to apply";
+    }
+    return false;
+  }
+
+  ConnectionParams originalParams = storedParams;
+
+  if (nextParams.minInterval > 0) storedParams.minInterval = nextParams.minInterval;
+  if (nextParams.maxInterval > 0) storedParams.maxInterval = nextParams.maxInterval;
+  if (nextParams.slaveLatency >= 0) storedParams.slaveLatency = nextParams.slaveLatency;
+  if (nextParams.supervisionTimeout > 0) storedParams.supervisionTimeout = nextParams.supervisionTimeout;
+
+  String validationError = "";
+  if (!validateParameterCombination(storedParams, validationError)) {
+    storedParams = originalParams;
+    if (errorMsg != nullptr) {
+      *errorMsg = validationError;
+    }
+    return false;
+  }
+
+  saveStoredParams();
+  addToHistory(source);
+
+  uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
+  uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
+  uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
+
+  if (isConnected && pClient && currentConnHandle != 0xffff) {
+    if (securityStatus.requireAuthentication && !isDeviceAuthenticated) {
+      if (authWarning != nullptr) {
+        *authWarning = true;
+      }
+    } else {
+      pClient->updateConnParams(minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
+      lastRequestedParams = storedParams;
+    }
+  }
+
+  hasNextParams = false;
+  nextParams = {0, 0, 0, 0};
+
+  broadcastState();
+  broadcastHistory();
+  return true;
+}
+
 void handleApiApplyParameters() {
   // Add CORS headers
   webServer.sendHeader("Access-Control-Allow-Origin", "*");
 
+  String errorMsg = "";
+  bool authWarning = false;
+  bool success = applyNextParametersInternal("Web API", &errorMsg, &authWarning);
+
+  if (!success) {
+    DynamicJsonDocument errorDoc(256);
+    errorDoc["error"] = errorMsg;
+    String errorResponse;
+    serializeJson(errorDoc, errorResponse);
+    webServer.send(400, "application/json", errorResponse);
+    return;
+  }
+
+  if (authWarning) {
+    DynamicJsonDocument warningDoc(256);
+    warningDoc["warning"] = "Parameters updated but not applied to active connection - authentication required";
+    String warningResponse;
+    serializeJson(warningDoc, warningResponse);
+    webServer.send(200, "application/json", warningResponse);
+    return;
+  }
+
+  handleApiState();
+}
+
+void sendUsbState() {
+  DynamicJsonDocument doc(1024);
+  doc["type"] = "state";
+
+  JsonObject params = doc.createNestedObject("parameters");
+  JsonObject current = params.createNestedObject("current");
+  current["connectionIntervalMin"] = storedParams.minInterval;
+  current["connectionIntervalMax"] = storedParams.maxInterval;
+  current["peripheralLatency"] = storedParams.slaveLatency;
+  current["supervisionTimeout"] = storedParams.supervisionTimeout;
+
   if (hasNextParams) {
-    // Store original parameters in case we need to rollback
-    ConnectionParams originalParams = storedParams;
+    JsonObject next = params.createNestedObject("next");
+    next["connectionIntervalMin"] = nextParams.minInterval;
+    next["connectionIntervalMax"] = nextParams.maxInterval;
+    next["peripheralLatency"] = nextParams.slaveLatency;
+    next["supervisionTimeout"] = nextParams.supervisionTimeout;
+  } else {
+    params["next"] = nullptr;
+  }
 
-    // Apply next parameters with validation
-    if (nextParams.minInterval > 0) storedParams.minInterval = nextParams.minInterval;
-    if (nextParams.maxInterval > 0) storedParams.maxInterval = nextParams.maxInterval;
-    if (nextParams.slaveLatency >= 0) storedParams.slaveLatency = nextParams.slaveLatency;
-    if (nextParams.supervisionTimeout > 0) storedParams.supervisionTimeout = nextParams.supervisionTimeout;
+  JsonObject status = doc.createNestedObject("status");
+  status["isConnected"] = isConnected;
+  status["connectedDeviceName"] = isConnected ? connectedDeviceName : "";
+  status["connectedDeviceAddress"] = isConnected ? connectedDeviceAddress : "";
+  status["isScanning"] = (pScan != nullptr && pScan->isScanning());
+  status["scanFilterEnabled"] = scanFilterEnabled;
+  status["scanFilterName"] = scanFilterEnabled ? scanNameFilter : "";
 
-    // Validate final parameter combination
-    String validationError = "";
-    if (!validateParameterCombination(storedParams, validationError)) {
-      // Rollback to original parameters
-      storedParams = originalParams;
+  String response;
+  serializeJson(doc, response);
+  Serial.println(response);
+}
 
-      DynamicJsonDocument errorDoc(256);
-      errorDoc["error"] = validationError;
-      String errorResponse;
-      serializeJson(errorDoc, errorResponse);
-      webServer.send(400, "application/json", errorResponse);
+void sendUsbHistory() {
+  DynamicJsonDocument doc(4096);
+  doc["type"] = "history_update";
+  JsonArray history = doc.createNestedArray("history");
 
-      Serial.println("Parameter validation failed: " + validationError);
-      return;
-    }    saveStoredParams();
-    addToHistory("Web API");
+  int count = min(historyCount, 10);
+  int startIdx = (historyIndex - count + 50) % 50;
 
-    // Update BLE characteristics
-    uint16_t minUnits = ms_to_conn_interval_units(storedParams.minInterval);
-    uint16_t maxUnits = ms_to_conn_interval_units(storedParams.maxInterval);
-    uint16_t timeoutUnits = ms_to_timeout_units(storedParams.supervisionTimeout);
-    uint16_t latency = storedParams.slaveLatency;
+  for (int i = 0; i < count; i++) {
+    int idx = (startIdx + i) % 50;
+    JsonObject entry = history.createNestedObject();
+    entry["id"] = idx;
+    entry["connectionIntervalMin"] = paramHistory[idx].connectionIntervalMin;
+    entry["connectionIntervalMax"] = paramHistory[idx].connectionIntervalMax;
+    entry["peripheralLatency"] = paramHistory[idx].peripheralLatency;
+    entry["supervisionTimeout"] = paramHistory[idx].supervisionTimeout;
+    entry["appliedAt"] = (unsigned long long)paramHistory[idx].timestamp * 1000 + paramHistory[idx].millisOffset;
+    entry["source"] = paramHistory[idx].source;
+  }
 
-    pMinCharacteristic->setValue((const uint8_t*)&minUnits, sizeof(minUnits));
-    pMaxCharacteristic->setValue((const uint8_t*)&maxUnits, sizeof(maxUnits));
-    pTimeoutCharacteristic->setValue((const uint8_t*)&timeoutUnits, sizeof(timeoutUnits));
-    pLatencyCharacteristic->setValue((const uint8_t*)&latency, sizeof(latency));
+  String response;
+  serializeJson(doc, response);
+  Serial.println(response);
+}
 
-    Serial.printf("Updated characteristics: Min=%d, Max=%d, Latency=%d, Timeout=%d\n",
-                  minUnits, maxUnits, latency, timeoutUnits);
+void sendUsbScanResults() {
+  DynamicJsonDocument doc(8192);
+  doc["type"] = "ble_scan_results";
+  JsonArray devices = doc.createNestedArray("devices");
 
-    // If connected, update connection parameters with enhanced error handling
-    if (deviceConnected && pServer && currentConnHandle != 0xffff) {
-      Serial.println("Applying new params to connected BLE central");
+  Serial.printf("D sendUsbScanResults: discoveredDeviceCount=%d, filter=%s\n", 
+                discoveredDeviceCount, scanFilterEnabled ? scanNameFilter.c_str() : "disabled");
+  
+  for (int i = 0; i < discoveredDeviceCount; ++i) {
+    JsonObject device = devices.createNestedObject();
+    device["address"] = discoveredDevices[i].address;
+    device["name"] = discoveredDevices[i].name;
+    device["rssi"] = discoveredDevices[i].rssi;
+    device["connectable"] = discoveredDevices[i].connectable;
+    device["lastSeenMs"] = discoveredDevices[i].lastSeenMs;
+    Serial.printf("D   [%d] %s : %s (rssi=%d, conn=%d)\n", 
+                  i, discoveredDevices[i].address.c_str(), 
+                  discoveredDevices[i].name.c_str(), 
+                  discoveredDevices[i].rssi, 
+                  discoveredDevices[i].connectable);
+  }
 
-      // Check if device is authenticated (if required)
-      if (securityStatus.requireAuthentication && !isDeviceAuthenticated) {
-        Serial.println("WARNING: Authentication required but device not authenticated. Parameters applied to characteristics only.");
+  String response;
+  serializeJson(doc, response);
+  Serial.println(response);
+}
 
-        DynamicJsonDocument warningDoc(256);
-        warningDoc["warning"] = "Parameters updated in characteristics but not applied to connection - authentication required";
-        String warningResponse;
-        serializeJson(warningDoc, warningResponse);
-        webServer.send(200, "application/json", warningResponse);
-      } else {
-        // Apply to active connection
-        pServer->updateConnParams(currentConnHandle, minUnits, maxUnits, storedParams.slaveLatency, timeoutUnits);
-        lastRequestedParams = storedParams;
-        Serial.printf("Successfully requested connection parameter update: Min=%.1f, Max=%.1f, Latency=%d, Timeout=%.1f\n",
-                      storedParams.minInterval, storedParams.maxInterval, storedParams.slaveLatency, storedParams.supervisionTimeout);
+void sendUsbServices() {
+  DynamicJsonDocument doc(16384);
+  doc["type"] = "ble_services_update";
+  doc["connected"] = isConnected;
+  doc["inProgress"] = servicesDiscoveryInProgress;
+  doc["mtu"] = negotiatedMtu;
+  if (servicesDiscoveryError.length() > 0) {
+    doc["error"] = servicesDiscoveryError;
+  } else {
+    doc["error"] = "";
+  }
+
+  if (discoveredServicesJson.length() > 0) {
+    DynamicJsonDocument serviceDoc(15360);
+    if (deserializeJson(serviceDoc, discoveredServicesJson) == DeserializationError::Ok) {
+      JsonArray source = serviceDoc.as<JsonArray>();
+      JsonArray target = doc.createNestedArray("services");
+      for (JsonVariant value : source) {
+        target.add(value);
       }
     } else {
-      Serial.println("No active BLE connection - parameters saved to characteristics for next connection");
+      doc.createNestedArray("services");
     }
+  } else {
+    doc.createNestedArray("services");
+  }
 
-    // Clear next parameters
+  String response;
+  serializeJson(doc, response);
+  Serial.println(response);
+}
+
+void sendUsbSecurity() {
+  DynamicJsonDocument doc(3072);
+  doc["type"] = "security_update";
+
+  JsonObject status = doc.createNestedObject("status");
+  status["isConnected"] = isConnected;
+  status["isAuthenticated"] = isDeviceAuthenticated;
+  status["currentDevice"] = isConnected ? connectedDeviceAddress : "";
+  status["pairedDeviceCount"] = pairedDeviceCount;
+  status["authRequired"] = securityStatus.requireAuthentication;
+  status["pairingInProgress"] = securityStatus.isPairing;
+  status["currentPin"] = securityStatus.currentPin;
+
+  JsonArray devices = doc.createNestedArray("pairedDevices");
+  for (int i = 0; i < pairedDeviceCount; i++) {
+    JsonObject device = devices.createNestedObject();
+    device["address"] = pairedDevices[i].address;
+    device["name"] = pairedDevices[i].name;
+    device["pairedAt"] = (unsigned long long)pairedDevices[i].pairedTime * 1000;
+  }
+
+  String response;
+  serializeJson(doc, response);
+  Serial.println(response);
+}
+
+void printUsbCommandHelp() {
+  Serial.println("USB commands:");
+  Serial.println("  HELP");
+  Serial.println("  PING");
+  Serial.println("  GET_STATE");
+  Serial.println("  SCAN_NOW");
+  Serial.println("  CONNECT <ble-address>");
+  Serial.println("  DISCONNECT");
+  Serial.println("  SET_FILTER <name-substring>");
+  Serial.println("  CLEAR_FILTER");
+  Serial.println("  GET_SCAN_RESULTS");
+  Serial.println("  GET_SERVICES");
+  Serial.println("  GET_HISTORY");
+  Serial.println("  GET_SECURITY");
+  Serial.println("  SET_AUTH_REQUIRED <0|1>");
+  Serial.println("  REMOVE_PAIRED <ble-address>");
+  Serial.println("  SET_NEXT <minMs> <maxMs> <latency> <timeoutMs>");
+  Serial.println("  CLEAR_NEXT");
+  Serial.println("  APPLY");
+}
+
+void processUsbCommand(const String& commandLine) {
+  String cmd = commandLine;
+  cmd.trim();
+  cmd.replace("\r", "");
+  cmd.replace("\n", "");
+
+  if (cmd.length() >= 2) {
+    if ((cmd.startsWith("\"") && cmd.endsWith("\"")) ||
+        (cmd.startsWith("'") && cmd.endsWith("'"))) {
+      cmd = cmd.substring(1, cmd.length() - 1);
+      cmd.trim();
+    }
+  }
+
+  if (cmd.length() == 0) {
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("HELP")) {
+    printUsbCommandHelp();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("PING")) {
+    Serial.println("{\"ok\":true,\"reply\":\"PONG\"}");
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("GET_STATE") || cmd.startsWith("GET_STATE")) {
+    sendUsbState();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("GET_SCAN_RESULTS")) {
+    sendUsbScanResults();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("GET_SERVICES")) {
+    sendUsbServices();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("GET_HISTORY")) {
+    sendUsbHistory();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("GET_SECURITY")) {
+    sendUsbSecurity();
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("SCAN_NOW")) {
+    doScan = true;
+    Serial.println("{\"ok\":true,\"message\":\"scan_requested\"}");
+    return;
+  }
+
+  if (cmd.startsWith("CONNECT ")) {
+    String address = cmd.substring(8);
+    address.trim();
+    if (address.length() == 0) {
+      Serial.println("{\"ok\":false,\"error\":\"Missing BLE address\"}");
+      return;
+    }
+    pendingConnectAddress = address;
+    doConnect = false;
+    doScan = true;
+    Serial.println("{\"ok\":true,\"message\":\"connect_requested\"}");
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("DISCONNECT")) {
+    if (isConnected && pClient != nullptr) {
+      pClient->disconnect();
+      pendingConnectAddress = "";
+      doConnect = false;
+      Serial.println("{\"ok\":true,\"message\":\"disconnected\"}");
+    } else {
+      Serial.println("{\"ok\":false,\"error\":\"No active connection\"}");
+    }
+    return;
+  }
+
+  if (cmd.startsWith("SET_FILTER ")) {
+    scanNameFilter = cmd.substring(11);
+    scanNameFilter.trim();
+    scanFilterEnabled = scanNameFilter.length() > 0;
+    clearDiscoveredDevices();
+    doScan = true;
+    Serial.println("{\"ok\":true,\"message\":\"filter_updated\"}");
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("CLEAR_FILTER")) {
+    scanNameFilter = "";
+    scanFilterEnabled = false;
+    clearDiscoveredDevices();
+    doScan = true;
+    Serial.println("{\"ok\":true,\"message\":\"filter_cleared\"}");
+    return;
+  }
+
+  if (cmd.startsWith("SET_AUTH_REQUIRED ")) {
+    String value = cmd.substring(18);
+    value.trim();
+    if (value != "0" && value != "1") {
+      Serial.println("{\"ok\":false,\"error\":\"Usage: SET_AUTH_REQUIRED <0|1>\"}");
+      return;
+    }
+    securityStatus.requireAuthentication = (value == "1");
+    Serial.println("{\"ok\":true,\"message\":\"auth_requirement_updated\"}");
+    return;
+  }
+
+  if (cmd.startsWith("REMOVE_PAIRED ")) {
+    String address = cmd.substring(14);
+    address.trim();
+    if (address.length() == 0) {
+      Serial.println("{\"ok\":false,\"error\":\"Usage: REMOVE_PAIRED <ble-address>\"}");
+      return;
+    }
+    removePairedDevice(address);
+    Serial.println("{\"ok\":true,\"message\":\"paired_device_removed\"}");
+    return;
+  }
+
+  if (cmd.startsWith("SET_NEXT ")) {
+    float minMs = 0;
+    float maxMs = 0;
+    int latency = 0;
+    float timeoutMs = 0;
+    String args = cmd.substring(9);
+    int parsed = sscanf(args.c_str(), "%f %f %d %f", &minMs, &maxMs, &latency, &timeoutMs);
+    if (parsed != 4) {
+      Serial.println("{\"ok\":false,\"error\":\"Usage: SET_NEXT <minMs> <maxMs> <latency> <timeoutMs>\"}");
+      return;
+    }
+    nextParams.minInterval = minMs;
+    nextParams.maxInterval = maxMs;
+    nextParams.slaveLatency = latency;
+    nextParams.supervisionTimeout = timeoutMs;
+    hasNextParams = true;
+    Serial.println("{\"ok\":true,\"message\":\"next_parameters_staged\"}");
+    return;
+  }
+
+  if (cmd.equalsIgnoreCase("CLEAR_NEXT")) {
     hasNextParams = false;
     nextParams = {0, 0, 0, 0};
+    Serial.println("{\"ok\":true,\"message\":\"next_parameters_cleared\"}");
+    return;
+  }
 
-    broadcastState();
-    broadcastHistory();
+  if (cmd.equalsIgnoreCase("APPLY")) {
+    String errorMsg = "";
+    bool authWarning = false;
+    bool success = applyNextParametersInternal("USB Serial", &errorMsg, &authWarning);
+    if (!success) {
+      DynamicJsonDocument errorDoc(256);
+      errorDoc["ok"] = false;
+      errorDoc["error"] = errorMsg;
+      String response;
+      serializeJson(errorDoc, response);
+      Serial.println(response);
+      return;
+    }
+    if (authWarning) {
+      Serial.println("{\"ok\":true,\"warning\":\"Parameters stored, authentication required before active apply\"}");
+      return;
+    }
+    Serial.println("{\"ok\":true,\"message\":\"parameters_applied\"}");
+    return;
+  }
 
-    handleApiState(); // Return updated state
-  } else {
-    webServer.send(400, "application/json", "{\"error\":\"No parameters to apply\"}");
+  Serial.println("{\"ok\":false,\"error\":\"Unknown command\"}");
+}
+
+void handleUsbSerialInput() {
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\n' || ch == '\r') {
+      if (usbCommandBuffer.length() > 0) {
+        processUsbCommand(usbCommandBuffer);
+        usbCommandBuffer = "";
+      }
+    } else {
+      usbCommandBuffer += ch;
+      if (usbCommandBuffer.length() > 256) {
+        usbCommandBuffer = "";
+        Serial.println("{\"ok\":false,\"error\":\"Command too long\"}");
+      }
+    }
   }
 }
 
@@ -1355,12 +2233,15 @@ void handleWifiPage() {
 
 void handleSaveWifi() {
   if (webServer.hasArg("ssid")) {
-    String ss = sanitizeCredential(webServer.arg("ssid"));
-    String pw = sanitizeCredential(webServer.arg("pass"));
+    String ss = webServer.arg("ssid");
+    String pw = webServer.arg("pass");
     Serial.printf("💾 Saving new WiFi credentials: SSID='%s'\n", ss.c_str());
     
     // Store in preferences
-    saveStoredWiFiCredentials(ss, pw);
+    preferences.begin("ble_cfg", false);
+    preferences.putString("ssid", ss);
+    preferences.putString("pass", pw);
+    preferences.end();
 
     // Send response with status page
     String html = "<html><head><title>WiFi Configuration</title>"
@@ -1507,6 +2388,8 @@ void setupWebServer() {
   webServer.on("/api/wifi", HTTP_GET, handleApiWifiStatus);
   webServer.on("/api/dashboard", HTTP_GET, handleApiDashboard);
   webServer.on("/api/parameters/apply", HTTP_POST, handleApiApplyParameters);
+  webServer.on("/api/ble/filter", HTTP_POST, handleApiBleFilter);
+  webServer.on("/api/ble/scan", HTTP_POST, handleApiBleScan);
 
   // Security API routes
   webServer.on("/api/security", HTTP_GET, handleApiSecurity);
@@ -1553,6 +2436,20 @@ void setupWebServer() {
     webServer.send(200);
   });
 
+  webServer.on("/api/ble/filter", HTTP_OPTIONS, []() {
+    webServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    webServer.send(200);
+  });
+
+  webServer.on("/api/ble/scan", HTTP_OPTIONS, []() {
+    webServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    webServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    webServer.send(200);
+  });
+
   // Security CORS preflight handlers
   webServer.on("/api/security", HTTP_OPTIONS, []() {
     webServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -1581,17 +2478,41 @@ void setupWebServer() {
 }
 
 void setupWiFi() {
+  Serial.println("[SETUP] setupWiFi() starting...");
+  Serial.flush();
+  delay(10);
+  
   // Load stored WiFi credentials
-  WiFiCredentials creds = loadStoredWiFiCredentials();
-  String stored_ssid = creds.ssid;
-  String stored_pass = creds.pass;
+  preferences.begin("ble_cfg", true);
+  String stored_ssid = preferences.getString("ssid", "");
+  String stored_pass = preferences.getString("pass", "");
+  preferences.end();
+  
+  Serial.println("[SETUP] Preferences loaded");
+  Serial.flush();
 
   // Try to connect to stored WiFi first
   if (stored_ssid.length() > 0) {
     Serial.printf("🔍 Found stored WiFi credentials for: '%s'\n", stored_ssid.c_str());
     Serial.println("📶 Attempting to connect to home WiFi...");
-    
+
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect(true, true);
+    delay(250);
+
+    WiFiScanDiagnostic scanDiagnostic = scanForTargetNetwork(stored_ssid);
+    String scanSummary;
+    if (scanDiagnostic.found) {
+      scanSummary = "SSID visible, matches=" + String(scanDiagnostic.matches) +
+                    ", RSSI=" + String(scanDiagnostic.rssi) +
+                    ", channel=" + String(scanDiagnostic.channel) +
+                    ", auth=" + String(wifiAuthModeToString(scanDiagnostic.authMode));
+      Serial.printf("📡 WiFi scan match: %s\n", scanSummary.c_str());
+    } else {
+      scanSummary = "SSID not found in scan results";
+      Serial.println("⚠️  Stored SSID was not found in scan results before connect attempt");
+    }
+    
     WiFi.begin(stored_ssid.c_str(), stored_pass.c_str());
     
     // Wait up to 15 seconds for connection with better feedback
@@ -1624,44 +2545,82 @@ void setupWiFi() {
       preferences.begin("ble_cfg", false);
       preferences.putString("last_ip", localIP.toString());
       preferences.putULong64("last_connect", millis());
+      preferences.putString("last_error", "");
+      preferences.putInt("last_error_code", WL_CONNECTED);
+      preferences.putString("last_status_text", wifiStatusToString(WL_CONNECTED));
+      preferences.putString("last_scan_result", scanSummary);
       preferences.end();
       
       return;
     } else {
-      Serial.printf("\n❌ Failed to connect to '%s' (Reason: %d)\n", stored_ssid.c_str(), WiFi.status());
+      wl_status_t finalStatus = (wl_status_t)WiFi.status();
+      String statusText = wifiStatusToString(finalStatus);
+      Serial.printf("\n❌ Failed to connect to '%s' (Reason: %d - %s)\n",
+                    stored_ssid.c_str(), finalStatus, statusText.c_str());
+      Serial.printf("🔎 Scan diagnostics: %s\n", scanSummary.c_str());
       Serial.println("💡 Common issues:");
       Serial.println("   - Incorrect password");
+      Serial.println("   - Extender/router security mode incompatibility (WPA3/WPA2 mixed mode)");
       Serial.println("   - Network out of range");
       Serial.println("   - Router temporarily unavailable");
       Serial.println("🔄 Falling back to Access Point mode...");
       
       // Clear failed credentials to prevent boot loops
       preferences.begin("ble_cfg", false);
-      preferences.putString("last_error", "Connection failed - code " + String(WiFi.status()));
+      preferences.putString("last_error", "Connection failed - code " + String(finalStatus) + " (" + statusText + ")");
+      preferences.putInt("last_error_code", finalStatus);
+      preferences.putString("last_status_text", statusText);
+      preferences.putString("last_scan_result", scanSummary);
       preferences.end();
     }
-  } else {
+  } 
+  
+  Serial.println("[SETUP] No stored credentials or connection failed, starting AP mode");
+  Serial.flush();
+  delay(10);
+  
+  // Fallback to Access Point mode (this line was duplicated below)
+  if (true) {
     Serial.println("🔍 No stored WiFi credentials found");
     Serial.println("🔄 Starting in Access Point mode...");
   }
 
-  // Fallback to Access Point mode
   WiFi.mode(WIFI_AP);
+  
+  Serial.println("[SETUP] WiFi.mode(WIFI_AP) set");
+  Serial.flush();
+  delay(10);
 
   // Create a unique AP name based on MAC address
   uint64_t mac = ESP.getEfuseMac();
   String apName = "ESP32-BLE-Control-" + String((uint32_t)(mac & 0xFFFFFF), HEX);
+  
+  Serial.print("[SETUP] AP name: ");
+  Serial.println(apName);
+  Serial.flush();
+  delay(10);
 
   // Start Access Point with a simple password
   const char* apPassword = "esp32ble";
 
   Serial.printf("Starting Access Point: '%s'\n", apName.c_str());
+  Serial.flush();
+  delay(10);
   Serial.printf("Password: '%s'\n", apPassword);
+  Serial.flush();
+  delay(10);
 
   bool result = WiFi.softAP(apName.c_str(), apPassword);
+  
+  Serial.println("[SETUP] WiFi.softAP() completed");
+  Serial.flush();
+  delay(10);
+  
   if (result) {
     IPAddress apIP = WiFi.softAPIP();
     Serial.println("✅ Access Point started successfully!");
+    Serial.flush();
+    delay(10);
     Serial.printf("📡 Network Name: %s\n", apName.c_str());
     Serial.printf("🔐 Password: %s\n", apPassword);
     Serial.printf("🌐 IP Address: %s\n", apIP.toString().c_str());
@@ -1669,26 +2628,45 @@ void setupWiFi() {
     Serial.printf("📊 WebSocket: ws://%s:81\n", apIP.toString().c_str());
     Serial.printf("🔧 WiFi Setup: http://%s/wificonfig\n", apIP.toString().c_str());
     Serial.println("📱 Connect your device to this network, then configure WiFi settings");
+    Serial.flush();
+    delay(10);
   } else {
     Serial.println("❌ Failed to start Access Point!");
+    Serial.flush();
   }
+  
+  Serial.println("[SETUP] setupWiFi() completed");
+  Serial.flush();
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\nStarting BLE Peripheral + WebServer (ESP32-S3)");
+  Serial.println("\n========================================");
+  Serial.println("  ESP32 BLE CLIENT MANAGER");
+  Serial.println("  Project : esp32-ble-connection-manager");
+  Serial.println("  Source  : src/main.cpp  (CLIENT build)");
+  Serial.println("  Role    : BLE Central (scanner/connector)");
+  Serial.println("  Built   : " __DATE__ " " __TIME__);
+  Serial.println("========================================");
+  Serial.println("Starting BLE Client Manager (ESP32-S3)");
 
   // Load previously saved parameters
   loadStoredParams();
 
-  // Setup BLE peripheral
+  // Setup BLE client manager (central role)
   setupBLE();
 
-  // Setup WiFi, webserver, and websocket
-  setupWiFi();
-  setupWebServer();
-  setupWebSocket();
+  if (BLE_USB_ONLY_MODE) {
+    WiFi.mode(WIFI_OFF);
+    Serial.println("USB-only mode enabled: WiFi/WebServer/WebSocket are disabled.");
+    printUsbCommandHelp();
+  } else {
+    // Setup WiFi, webserver, and websocket
+    setupWiFi();
+    setupWebServer();
+    setupWebSocket();
+  }
 
   // Add initial history entry
   addToHistory("startup");
@@ -1699,8 +2677,35 @@ void setup() {
 }
 
 void loop() {
-  webServer.handleClient();
-  webSocket.loop();
+  handleUsbSerialInput();
+
+  if (!BLE_USB_ONLY_MODE) {
+    webServer.handleClient();
+    webSocket.loop();
+  }
+
+  // Safety watchdog: central firmware must never advertise.
+  static unsigned long lastAdvWatchdogCheck = 0;
+  if (millis() - lastAdvWatchdogCheck > 1000) {
+    lastAdvWatchdogCheck = millis();
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    if (pAdvertising != nullptr && pAdvertising->isAdvertising()) {
+      Serial.println("WARNING: advertising became active unexpectedly; forcing stop");
+      pAdvertising->stop();
+    }
+  }
+
+  // BLE Client scanning and connection management
+  if (doScan && !isConnected) {
+    if (scanFilterEnabled) {
+      Serial.printf("Starting BLE scan with name filter: '%s'\n", scanNameFilter.c_str());
+    } else {
+      Serial.println("Starting BLE scan for peripherals...");
+    }
+    pScan->start(5, false); // Scan for 5 seconds, don't continue previous scan
+    doScan = false;
+    doConnect = pendingConnectAddress.length() > 0; // Connect only when a target address was selected
+  }
 
   // Check if we need to apply next parameters with retry limit
   static unsigned long lastParamCheck = 0;
@@ -1713,7 +2718,14 @@ void loop() {
     
     // Store current hasNextParams state to detect if apply failed
     bool hadNextParams = hasNextParams;
-    handleApiApplyParameters();
+    String applyError = "";
+    bool authWarning = false;
+    bool applied = applyNextParametersInternal("Auto", &applyError, &authWarning);
+    if (!applied) {
+      Serial.println("Auto-apply failed: " + applyError);
+    } else if (authWarning) {
+      Serial.println("Auto-apply deferred: authentication required for active connection");
+    }
     
     // If parameters still pending after apply attempt, increment retry count
     if (hasNextParams && hadNextParams) {
@@ -1740,14 +2752,49 @@ void loop() {
     lastStatusMs = now;
     Serial.print("Status: ");
     Serial.printf("connected=%s, connHandle=%u, authenticated=%s, paired_devices=%d, ",
-                  deviceConnected ? "true" : "false", currentConnHandle,
+                  isConnected ? "true" : "false", currentConnHandle,
                   isDeviceAuthenticated ? "true" : "false", pairedDeviceCount);
     Serial.printf("stored[min=%.2fms,max=%.2fms,sto=%.0fms,lat=%d], lastRequested[min=%.2fms,max=%.2fms,sto=%.0fms,lat=%d]\n",
                   storedParams.minInterval, storedParams.maxInterval, storedParams.supervisionTimeout, storedParams.slaveLatency,
                   lastRequestedParams.minInterval, lastRequestedParams.maxInterval, lastRequestedParams.supervisionTimeout, lastRequestedParams.slaveLatency);
 
-    // Broadcast current state periodically
-    broadcastState();
+    if (!BLE_USB_ONLY_MODE) {
+      // Broadcast current state periodically
+      broadcastState();
+    }
+  }
+
+  // Run service discovery after connect in loop context.
+  if (isConnected && servicesDiscoveryPending && !servicesDiscoveryInProgress &&
+      millis() >= servicesDiscoveryNextAttemptMs) {
+    Serial.printf("Starting deferred GATT discovery attempt %d/3\n", servicesDiscoveryRetryCount + 1);
+    discoverConnectedServices(pClient);
+
+    bool hasServices = discoveredServicesJson.length() > 2;
+    if (!hasServices && servicesDiscoveryRetryCount < 2) {
+      servicesDiscoveryRetryCount++;
+      servicesDiscoveryNextAttemptMs = millis() + 1200;
+      Serial.printf("GATT discovery empty, scheduling retry %d/3\n", servicesDiscoveryRetryCount + 1);
+    } else {
+      servicesDiscoveryPending = false;
+      if (!hasServices) {
+        Serial.println("GATT discovery completed with no services");
+      } else {
+        Serial.println("GATT discovery completed with services");
+      }
+    }
+  }
+
+  // Restart scanning periodically while disconnected.
+  // Keep this active even with a pending connect request so a selected device can be found again.
+  if (!isConnected && !doScan && millis() - lastScanRestartMs > 10000) {
+    if (pendingConnectAddress.length() > 0) {
+      Serial.printf("Pending BLE target %s - restarting scan...\n", pendingConnectAddress.c_str());
+    } else {
+      Serial.println("No connection - restarting scan...");
+    }
+    doScan = true;
+    lastScanRestartMs = millis();
   }
 
   delay(10);

@@ -1,5 +1,7 @@
 # ESP32 BLE Firmware Integration Guide
 
+Canonical setup and run commands are maintained in `README.md`. Use that file first, then use this guide for firmware integration internals.
+
 ## Overview
 
 This document describes how to integrate ESP32 firmware with the BLE Connection Parameter Dashboard web interface. The web interface communicates with the ESP32 via WebSocket to monitor connection status and configure BLE connection parameters in real-time.
